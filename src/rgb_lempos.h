@@ -51,8 +51,8 @@ public:
 	enum color {
 		black = 0,
 		red = 0b100,
-		green = 0b010,
-		blue = 0b001,
+		green = 0b001,
+		blue = 0b010,
 		white = 0b111
 	};
 
