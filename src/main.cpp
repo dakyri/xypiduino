@@ -8,7 +8,7 @@
 
 #include "rgb_lempos.h"
 
-#define SERIAL_DEBUG
+#undef SERIAL_DEBUG
 #define SERIAL_DEBUG_LEVEL 1
 
 #ifdef SERIAL_DEBUG
@@ -63,7 +63,7 @@ public:
 	}
 
 protected:
-	PCF8574<I2c> & const device;
+	PCF8574<I2c> & device;
 	const uint8_t atbit;
 	const uint8_t baseColor;
 	unsigned long unblink_ms;
