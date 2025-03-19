@@ -1,7 +1,8 @@
 #include <Arduino.h>
 #include <MIDI.h>
-
 #include <I2c.h>
+#include <SPI.h>
+
 #include <PCF8574mw.h>
 #include <PCF8591mw.h>
 #include <common.h>
@@ -215,9 +216,6 @@ void checkPedal(const uint8_t which, const uint8_t reading) {
 	}
 }
 
-#ifdef SERIAL_DEBUG
-#endif
-
 void setup() {
 
 #ifdef SERIAL_DEBUG
@@ -235,6 +233,8 @@ void setup() {
 
 #endif
 	adcEnable.setInputs(0x07);
+
+	/* light show, just to check shit works */
 	for (byte i=0; i<8; ++i) {
 		lamps.setLamp(i, color::red);
 	}
@@ -251,28 +251,36 @@ void setup() {
 	lamps.illuminate();
 	statusLamp.setColor(Lamp8574::blue);
 	mw::hang(200);
+
+	/* check for main i2c devices. first 8574 for top panel buttons */
 	if (buttonStates.begin()) {
 		lamps.setLamp(0, color::blue);
 		lamps.illuminate();
 		mw::hang(200);
 	}
+
+	/* check 8574 for status lamp and pedal enables */
 	if (adcEnable.begin()) {
 		lamps.setLamp(1, color::blue);
 		lamps.illuminate();
 		mw::hang(200);
 	}
+
+	/* check the 8591 adc for pedals */
 	if (adc.begin()) {
 		lamps.setLamp(2, color::blue);
 		lamps.illuminate();
 		mw::hang(200);
 	}
 
+	/* set main lamps to base color */
 	for (byte i=0; i<8; ++i) {
 		lamps.setLamp(i, color::green);
 	}
 	lamps.illuminate();
 	statusLamp.setColor(Lamp8574::green);
 
+	/* setup MIDI */
 	midiA.turnThruOn();
 	midiA.begin(MIDI_CHANNEL_OMNI);
 }
