@@ -8,12 +8,8 @@
 
 #include "rgb_lempos.h"
 
-#undef SERIAL_DEBUG
+#define SERIAL_DEBUG
 #define SERIAL_DEBUG_LEVEL 1
-
-#ifdef SERIAL_DEBUG
-#include <Wire.h>
-#endif
 
 midi::MidiInterface<HardwareSerial> midiA((HardwareSerial&)Serial1);
 
@@ -40,9 +36,9 @@ public:
 	Lamp8574(PCF8574<I2c> &d, uint8_t b): device(d), atbit(b), baseColor(Lamp8574::color::green), unblink_ms(0) {}
 	enum color {
 		black = 0b111,
-		red = 0b011,
-		green = 0b110,
-		blue = 0b101,
+		blue = 0b011,
+		red = 0b110,
+		green = 0b101,
 		white = 0b000
 	};
 
@@ -152,14 +148,18 @@ void checkPanelButton(const uint8_t which, const bool pressed) {
 				midiA.sendControlChange(b.value, 127, b.midiChannel);
 			} else if (b.mode == button::mode_t::prog){
 				midiA.sendProgramChange(b.value, b.midiChannel);
+				statusLamp.setColor(Lamp8574::red, 100);
 			} else if (b.mode == button::mode_t::note){
 				midiA.sendNoteOn(b.value, buttonVelocity, b.midiChannel);
+				statusLamp.setColor(Lamp8574::red, 100);
 			} else if (b.mode == button::mode_t::ctrlLatch){
 				b.mode = button::mode_t::ctrlLatchOn;
 				midiA.sendControlChange(b.value, 127, b.midiChannel);
+				statusLamp.setColor(Lamp8574::red, 100);
 			} else if (b.mode == button::mode_t::ctrlLatchOn){
 				b.mode = button::mode_t::ctrlLatch;
 				midiA.sendControlChange(b.value, 0, b.midiChannel);
+				statusLamp.setColor(Lamp8574::red, 100);
 			}
 			lamps.setLamp(which,
 				b.mode == button::mode_t::ctrlLatch? b.lampColor: b.activeColor);
@@ -168,8 +168,10 @@ void checkPanelButton(const uint8_t which, const bool pressed) {
 			b.pressed = false;
 			if (b.mode == button::mode_t::ctrl) {
 				midiA.sendControlChange(b.value, 0, b.midiChannel);
+				statusLamp.setColor(Lamp8574::red, 100);
 			} else if (b.mode == button::mode_t::note){
 				midiA.sendNoteOff(b.value, buttonVelocity, b.midiChannel); 
+				statusLamp.setColor(Lamp8574::red, 100);
 			}
 			switch (b.mode) {
 			case button::mode_t::ctrl:
@@ -202,6 +204,7 @@ void checkPedal(const uint8_t which, const uint8_t reading) {
 				ped.lastVal = ctrlVal;
 				ped.lastChangeTime_ms = theTime;
 				midiA.sendControlChange(ped.ctrl, ctrlVal, ped.midiChannel);
+				statusLamp.setColor(Lamp8574::red, 100);
 				/*
 				if (potChangeT_ms > 200) {
 					lamp.blink(3, 50);
@@ -246,6 +249,7 @@ void setup() {
 		lamps.setLamp(i, color::green);
 	}
 	lamps.illuminate();
+	statusLamp.setColor(Lamp8574::blue);
 	mw::hang(200);
 	if (buttonStates.begin()) {
 		lamps.setLamp(0, color::blue);
@@ -267,12 +271,14 @@ void setup() {
 		lamps.setLamp(i, color::green);
 	}
 	lamps.illuminate();
+	statusLamp.setColor(Lamp8574::green);
 
 	midiA.turnThruOn();
 	midiA.begin(MIDI_CHANNEL_OMNI);
 }
-int m = 0;
+
 void loop() {
+	statusLamp.checkBlink();
 	if (midiA.read()) {
 #ifdef SERIAL_DEBUG
 		Serial.print(midiA.getType(), HEX);Serial.print(' ');
