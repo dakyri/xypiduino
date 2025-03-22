@@ -437,6 +437,16 @@ void setup() {
 	/* setup MIDI */
 	midiA.turnThruOn();
 	midiA.begin(MIDI_CHANNEL_OMNI);
+
+	/* setup SPI to with rasbpi as master */
+	pinMode(MISO, OUTPUT);
+	SPCR |= _BV(SPE);
+	SPI.attachInterrupt();
+}
+
+ISR (SPI_STC_vect)
+{
+	uint8_t spi_in = SPDR;
 }
 
 void loop() {
