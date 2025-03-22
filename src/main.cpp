@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <MIDI.h>
 #include <I2c.h>
-#include <SPI.h>
 
 #include <PCF8574mw.h>
 #include <PCF8591mw.h>
@@ -19,8 +18,7 @@ using color=RGBLempos::color;
 constexpr uint8_t kButtonStateAdr = 0x38;
 constexpr uint8_t kAdcEnableAdr = 0x39;
 constexpr uint8_t kAdcAdr = 0x48;
-constexpr uint8_t debounceDelay_ms = 50;
-constexpr uint8_t buttonVelocity = 80;
+constexpr uint8_t debounceDelay_ms = 10;
 constexpr uint8_t pedalChangeMinTime_ms = 50;
 
 
@@ -72,37 +70,51 @@ Lamp8574 statusLamp(adcEnable, 4);
  * mappings for button states
  */
 struct button {
-	enum class mode_t: uint8_t {
-		note = 0,
+	enum mode_t: uint8_t {
+		nieko = 0,
 		prog = 1,
 		ctrl = 2,
-		ctrlLatch = 3,
-		ctrlLatchOn = 4
+		chanpress = 3,
+		keypress = 4,
+		note = 5,
+		start = 6,
+		stop = 7,
+		type = 0x07,
+		latch = 0x10,
+		latchOn = 0x20
 	};
-	button(const mode_t mode, const uint8_t val, const uint8_t channel,
-		const color lampColor, const color activeColor)
-	: lastBounceTime_ms(0), mode(mode), lastState(false), pressed(false),
-	  value(val), midiChannel(channel), lampColor(lampColor), activeColor(activeColor) {}
+	button(const uint8_t chan, const uint8_t md, const uint8_t v1, const uint8_t v2, const uint8_t lmd, const uint8_t lv1, const uint8_t lv2)
+	: lastBounceTime_ms(0), mode(md), val1(v1), val2(v2), long_mode(lmd), long_val1(lv1), long_val2(lv2),
+	  channel(chan), lastState(false), pressed(false) {}
 
 	long lastBounceTime_ms;
-	mode_t mode;
+	long pressedTime_ms;
+	const uint8_t mode;
+	const uint8_t val1;
+	const uint8_t val2;
+	const uint8_t long_mode;
+	const uint8_t long_val1;
+	const uint8_t long_val2;
+	const uint8_t channel;
+	uint8_t active_mode;
+	uint8_t active_val1;
 	bool lastState;
 	bool pressed;
-	uint8_t value;
-	uint8_t midiChannel;
-	color lampColor;
-	color activeColor;
 };
 
+using btmode = button::mode_t;
+
+#define LATCH(X) ((button::mode_t)(X|btmode::latch))
+
 struct button buttons[] = {
-	{ button::mode_t::ctrl, 32, 0, color::green, color::red},
-	{ button::mode_t::note, 33, 0, color::green, color::red},
-	{ button::mode_t::ctrlLatch, 34, 0, color::green, color::blue},
-	{ button::mode_t::prog, 35, 0, color::green, color::red},
-	{ button::mode_t::ctrl, 36, 0, color::green, color::red},
-	{ button::mode_t::ctrl, 37, 0, color::green, color::red},
-	{ button::mode_t::ctrl, 38, 0, color::green, color::red},
-	{ button::mode_t::ctrl, 39, 0, color::green, color::red},
+	{ 0, btmode::ctrl, 32, 127,			btmode::latch, 0, 0},
+	{ 0, btmode::note, 33, 80,			btmode::latch, 0, 0},
+	{ 0, LATCH(btmode::ctrl), 34, 80,	btmode::ctrl, 34, 120},
+	{ 0, btmode::prog, 35, 33,			btmode::latch, 0, 0},
+	{ 0, btmode::ctrl, 36, 120,			btmode::latch, 0, 0},
+	{ 0, btmode::note, 37, 80,			LATCH(btmode::keypress), 37, 100},
+	{ 0, btmode::start, 38, 120,		btmode::latch, 0, 0},
+	{ 0, btmode::nieko, 39, 120,		btmode::latch, 0, 0},
 };
 constexpr uint8_t nButtons = sizeof(buttons)/sizeof(button);
 
@@ -128,9 +140,64 @@ struct pedal pedals[] = {
 };
 constexpr uint8_t nPedals = sizeof(pedals)/sizeof(pedal);
 
+constexpr uint8_t lmpRestCol = color::green;
+constexpr uint8_t lmpDownCol = color::red;
+constexpr uint8_t lmpHoldCol = color::blue;
 /*!
  *
  */
+
+ void sendButtonOnMidi(uint8_t typ, uint8_t chan, uint8_t v1, uint8_t v2) {
+	bool sent = false;
+	switch (typ) {
+		case btmode::prog:
+			midiA.sendProgramChange(v1, chan); sent = true;
+			break;
+		case btmode::ctrl:
+			midiA.sendControlChange(v1, v2, chan); sent = true;
+			break;
+		case btmode::keypress:
+			midiA.sendPolyPressure(v1, v2, chan); sent = true;
+			break;
+		case btmode::chanpress:
+			midiA.sendAfterTouch(v1, chan); sent = true;
+			break;
+		case btmode::note:
+			midiA.sendNoteOn(v1, v2, chan); sent = true;
+			break;
+		case btmode::start:
+			midiA.sendRealTime(midi::MidiType::Start); sent = true;
+			break;
+		case btmode::stop:
+			midiA.sendRealTime(midi::MidiType::Stop); sent = true;
+			break;
+	}
+	if (sent) {
+		statusLamp.setColor(Lamp8574::red, 100);
+	}
+};
+
+void sendButtonOffMidi(uint8_t typ, uint8_t chan, uint8_t v1, uint8_t v2) {
+	bool sent = false;
+	switch (typ) {
+		case btmode::ctrl:
+			midiA.sendControlChange(v1, 0, chan); sent = true;
+			break;
+		case btmode::note:
+			midiA.sendNoteOff(v1, v2, chan); sent = true;
+			break;
+		case btmode::start:
+			midiA.sendRealTime(midi::MidiType::Stop); sent = true;
+			break;
+		case btmode::stop:
+			midiA.sendRealTime(midi::MidiType::Start); sent = true;
+			break;
+	}
+	if (sent) {
+		statusLamp.setColor(Lamp8574::red, 100);
+	}
+}
+
 void checkPanelButton(const uint8_t which, const bool pressed) {
 
 	long theTime = millis();
@@ -143,47 +210,26 @@ void checkPanelButton(const uint8_t which, const bool pressed) {
 	}
 	if (theTime > debounceDelay_ms + b.lastBounceTime_ms) {
 		if (pressed && !b.pressed) {
-			Serial.print(which); Serial.println(" pressed");
 			b.pressed = true;
-			if (b.mode == button::mode_t::ctrl) {
-				midiA.sendControlChange(b.value, 127, b.midiChannel);
-			} else if (b.mode == button::mode_t::prog){
-				midiA.sendProgramChange(b.value, b.midiChannel);
-				statusLamp.setColor(Lamp8574::red, 100);
-			} else if (b.mode == button::mode_t::note){
-				midiA.sendNoteOn(b.value, buttonVelocity, b.midiChannel);
-				statusLamp.setColor(Lamp8574::red, 100);
-			} else if (b.mode == button::mode_t::ctrlLatch){
-				b.mode = button::mode_t::ctrlLatchOn;
-				midiA.sendControlChange(b.value, 127, b.midiChannel);
-				statusLamp.setColor(Lamp8574::red, 100);
-			} else if (b.mode == button::mode_t::ctrlLatchOn){
-				b.mode = button::mode_t::ctrlLatch;
-				midiA.sendControlChange(b.value, 0, b.midiChannel);
-				statusLamp.setColor(Lamp8574::red, 100);
+			b.pressedTime_ms = theTime;
+			b.active_mode = b.mode;
+			const auto btype = b.active_mode & btmode::type;
+
+			if (b.active_mode & btmode::latch){
+				b.active_mode |= btmode::latchOn;
 			}
-			lamps.setLamp(which,
-				b.mode == button::mode_t::ctrlLatch? b.lampColor: b.activeColor);
+			sendButtonOnMidi(btype, b.channel, b.val1, b.val2);
+			lamps.setLamp(which, b.active_mode & btmode::latchOn? lmpHoldCol: lmpDownCol);
 
 		} else if (!pressed && b.pressed ) {
-			b.pressed = false;
-			if (b.mode == button::mode_t::ctrl) {
-				midiA.sendControlChange(b.value, 0, b.midiChannel);
-				statusLamp.setColor(Lamp8574::red, 100);
-			} else if (b.mode == button::mode_t::note){
-				midiA.sendNoteOff(b.value, buttonVelocity, b.midiChannel); 
-				statusLamp.setColor(Lamp8574::red, 100);
+			b.pressed = false;	
+			if (b.active_mode & btmode::latchOn){
+				b.active_mode &= ~btmode::latchOn;
 			}
-			switch (b.mode) {
-			case button::mode_t::ctrl:
-			case button::mode_t::note:			
-			case button::mode_t::prog:
-				lamps.setLamp(which, b.lampColor);
-				break;
-			default:
-				break;
-			}
+			const auto btype = b.active_mode & btmode::type;
 
+			sendButtonOffMidi(btype, b.channel, b.val1, b.val2);
+			lamps.setLamp(which, b.active_mode & btmode::latchOn? lmpHoldCol: lmpRestCol);
 		}
 	}
 }
