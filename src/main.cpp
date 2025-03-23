@@ -18,7 +18,10 @@ using color=RGBLempos::color;
 constexpr uint8_t kButtonStateAdr = 0x38;
 constexpr uint8_t kAdcEnableAdr = 0x39;
 constexpr uint8_t kAdcAdr = 0x48;
+
 constexpr uint8_t debounceDelay_ms = 10;
+constexpr uint16_t longPressTime_ms = 500;
+
 constexpr uint8_t pedalChangeMinTime_ms = 50;
 
 
@@ -81,11 +84,19 @@ struct button {
 		stop = 7,
 		type = 0x07,
 		latch = 0x10,
-		latchOn = 0x20
 	};
+
+	enum state_t: uint8_t {
+		open = 0,
+		pressed = 0x01,
+		longPressed = 0x02,
+		latched = 0x80,
+		latching = 0x40 // latch state = latched|latching when first engaged, so the next button up will keep the latch
+	};
+
 	button(const uint8_t chan, const uint8_t md, const uint8_t v1, const uint8_t v2, const uint8_t lmd, const uint8_t lv1, const uint8_t lv2)
 	: lastBounceTime_ms(0), mode(md), val1(v1), val2(v2), long_mode(lmd), long_val1(lv1), long_val2(lv2),
-	  channel(chan), lastState(false), pressed(false) {}
+	  channel(chan), state(state_t::open), lastPressState(false) {}
 
 	long lastBounceTime_ms;
 	long pressedTime_ms;
@@ -96,13 +107,14 @@ struct button {
 	const uint8_t long_val1;
 	const uint8_t long_val2;
 	const uint8_t channel;
-	uint8_t active_mode;
+	uint8_t active_type;
 	uint8_t active_val1;
-	bool lastState;
-	bool pressed;
+	uint8_t state;
+	bool lastPressState;
 };
 
 using btmode = button::mode_t;
+using btst8 = button::state_t;
 
 #define LATCH(X) ((button::mode_t)(X|btmode::latch))
 
@@ -140,9 +152,9 @@ struct pedal pedals[] = {
 };
 constexpr uint8_t nPedals = sizeof(pedals)/sizeof(pedal);
 
-constexpr uint8_t lmpRestCol = color::green;
-constexpr uint8_t lmpDownCol = color::red;
-constexpr uint8_t lmpHoldCol = color::blue;
+constexpr uint8_t lmpBtOpenCol = color::green;
+constexpr uint8_t lmpBtDownCol = color::red;
+constexpr uint8_t lmpBtLatchCol = color::blue;
 /*!
  *
  */
@@ -157,7 +169,7 @@ constexpr uint8_t lmpHoldCol = color::blue;
 			midiA.sendControlChange(v1, v2, chan); sent = true;
 			break;
 		case btmode::keypress:
-			midiA.sendPolyPressure(v1, v2, chan); sent = true;
+			midiA.sendAfterTouch(v1, v2, chan); sent = true;
 			break;
 		case btmode::chanpress:
 			midiA.sendAfterTouch(v1, chan); sent = true;
@@ -204,32 +216,49 @@ void checkPanelButton(const uint8_t which, const bool pressed) {
 	
 	auto & b{buttons[which]};
 
-	if (pressed != b.lastState) {
-		b.lastState = pressed;
+	if (pressed != b.lastPressState) {
+		b.lastPressState = pressed;
 		b.lastBounceTime_ms = theTime; //set the current time
 	}
 	if (theTime > debounceDelay_ms + b.lastBounceTime_ms) {
-		if (pressed && !b.pressed) {
-			b.pressed = true;
-			b.pressedTime_ms = theTime;
-			b.active_mode = b.mode;
-			const auto btype = b.active_mode & btmode::type;
+		if (pressed) {
+			if (!(b.state & btst8::pressed)) {
+				b.state |= btst8::pressed;
+				b.pressedTime_ms = theTime;
+				const auto btype = b.mode & btmode::type;
+				b.active_type = btype;
 
-			if (b.active_mode & btmode::latch){
-				b.active_mode |= btmode::latchOn;
+				if (b.mode & btmode::latch){
+					b.state |= (btst8::latched|btst8::latching);
+				}
+				sendButtonOnMidi(btype, b.channel, b.val1, b.val2);
+				lamps.setLamp(which, (b.state & btst8::latched)? lmpBtLatchCol: lmpBtDownCol);
+			} else if (!(b.state & btst8::longPressed) && b.pressedTime_ms + longPressTime_ms < theTime) {
+				b.state |= btst8::longPressed;
+				const auto btype = b.long_mode & btmode::type;
+				if (b.long_mode & btmode::latch){
+					b.state |= (btst8::latched|btst8::latching);
+				}
+				if (btype > b.active_type) {
+					b.active_type = btype;
+					b.active_val1 = b.long_val1;
+				}
+				sendButtonOnMidi(btype, b.channel, b.long_val1, b.long_val2);
+				lamps.setLamp(which, (b.state & btst8::latched)? lmpBtLatchCol: lmpBtDownCol);
 			}
-			sendButtonOnMidi(btype, b.channel, b.val1, b.val2);
-			lamps.setLamp(which, b.active_mode & btmode::latchOn? lmpHoldCol: lmpDownCol);
+		} else {
+			if (b.state & btst8::pressed) {
+				if (b.state & btst8::latching) {
+					b.state &= ~btst8::latching;
+				} else if (b.state & btst8::latched){
+					b.state &= ~btst8::latched;
+				}
+				b.state &= ~btst8::pressed;	
+				const auto btype = b.active_type & btmode::type;
 
-		} else if (!pressed && b.pressed ) {
-			b.pressed = false;	
-			if (b.active_mode & btmode::latchOn){
-				b.active_mode &= ~btmode::latchOn;
+				sendButtonOffMidi(btype, b.channel, b.val1, b.val2);
+				lamps.setLamp(which, b.state & btst8::latched? lmpBtLatchCol: lmpBtOpenCol);
 			}
-			const auto btype = b.active_mode & btmode::type;
-
-			sendButtonOffMidi(btype, b.channel, b.val1, b.val2);
-			lamps.setLamp(which, b.active_mode & btmode::latchOn? lmpHoldCol: lmpRestCol);
 		}
 	}
 }
