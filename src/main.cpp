@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <MIDI.h>
 #include <I2c.h>
+#include <SPI.h>
 
 #include <PCF8574mw.h>
 #include <PCF8591mw.h>
