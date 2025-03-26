@@ -9,6 +9,8 @@
 #include <common.h>
 
 #include "rgb_lempos.h"
+#include "xyspi.h"
+#include "midi_ring_buffer.h"
 
 #define SERIAL_DEBUG
 #define SERIAL_DEBUG_LEVEL 1
@@ -445,9 +447,165 @@ void setup() {
 	SPI.attachInterrupt();
 }
 
+
+MidiRingBuffer<32> spiMidiIn;
+MidiRingBuffer<32> spiMidiOut;
+
+/*!
+ * the spi interrupt routine is a pair of ad hoc state machines, with these states
+ */
+enum spi_io_state_t: uint8_t {
+	command_byte = 0,	//!< processing a command byte
+	midi_data = 1,		//!< processing midi bytes
+	midi_data_1 = 2,		//!< processing midi bytes
+	midi_data_2 = 3,		//!< processing midi bytes
+	tempo_data = 4,
+	tempo_data_1 = 5,
+	tempo_data_2 = 6,
+	tempo_data_3 = 7,
+	config_btn_id = 8,
+	config_btn_len = 9,
+	config_btn_dta = 10,
+	config_ped_id = 11,
+	config_ped_len = 12,
+	config_ped_dta = 13,
+	config_xlr_id = 14,
+	config_xlr_len = 15,
+	config_xlr_dta = 16,
+	filler = 17
+};
+spi_io_state_t spi_in_state = command_byte;
+spi_io_state_t spi_out_state = command_byte;
+uint8_t n_midi_cmd_incoming = 0, n_midi_cmd_outgoing = 0;
+uint8_t cmd_in = 0, val1_in = 0, val2_in = 0;
+bool dropped_midi_in = false;
+uint8_t cmd_out = 0, val1_out = 0, val2_out = 0;
+
 ISR (SPI_STC_vect)
 {
-	uint8_t spi_in = SPDR;
+	switch (spi_in_state) {
+		case command_byte: {
+			uint8_t cmd = SPDR;
+			if (cmd & xyspi::midi) {
+				spi_in_state = midi_data;
+				n_midi_cmd_incoming = cmd & 0x7f;
+			} else {
+				switch (cmd) {
+					case xyspi::null:
+						break;
+					case xyspi::ping:
+						break;
+					case xyspi::pong:
+						break;
+					case xyspi::rescan:
+						break;
+					case xyspi::tempo:
+						break;
+				}
+			}
+			break;
+		}
+		case midi_data:
+			cmd_in = SPDR;
+			spi_in_state = midi_data_1;
+			break;
+		case midi_data_1:
+			val1_in = SPDR;
+			spi_in_state = midi_data_2;
+			break;
+		case midi_data_2:
+			val2_in =SPDR;
+			if (!spiMidiIn.addToBuf(cmd_in, val1_in, val2_in)) {
+				dropped_midi_in = true;
+			}
+			spi_in_state = midi_data;
+			break;
+		case tempo_data:
+			spi_in_state = tempo_data_1;
+			break;
+		case tempo_data_1:
+			spi_in_state = tempo_data_2;
+			break;
+		case tempo_data_2:
+			spi_in_state = tempo_data_3;
+			break;
+		case tempo_data_3:
+			spi_in_state = command_byte;
+			break;
+		case config_btn_id:
+			spi_in_state = config_btn_len;
+			break;
+		case config_btn_len:
+			spi_in_state = config_btn_dta;
+			break;
+		case config_btn_dta:
+			spi_in_state = command_byte;
+			break;
+		case config_ped_id:
+			spi_in_state = config_ped_len;
+			break;
+		case config_ped_len:
+			spi_in_state = config_ped_dta;
+			break;
+		case config_ped_dta:
+			spi_in_state = command_byte;
+			break;
+		case config_xlr_id:
+			spi_in_state = config_xlr_len;
+			break;
+		case config_xlr_len:
+			spi_in_state = config_xlr_dta;
+			break;
+		case config_xlr_dta:
+			spi_in_state = command_byte;
+			break;
+		case filler:
+			spi_in_state = filler;
+			break;
+		default:
+			spi_in_state = command_byte;
+			break;
+	}
+
+	switch (spi_out_state) {
+		case command_byte: {
+			n_midi_cmd_outgoing = spiMidiOut.count;
+			if (n_midi_cmd_outgoing > 0) {
+				SPDR = (xyspi::midi | n_midi_cmd_outgoing);
+				spi_out_state = midi_data;
+			} else {
+				SPDR = xyspi::pong;
+				spi_out_state = filler;
+			}
+			break;
+		}
+		case midi_data:
+			spiMidiOut.getFromBuf(cmd_out, val1_out, val2_out);
+			SPDR = cmd_out;
+			spi_out_state = midi_data_1;
+			break;
+		case midi_data_1:
+			SPDR = val1_out;
+			spi_out_state = midi_data_2;
+			break;
+		case midi_data_2:
+			SPDR = val2_out;
+			if ((--n_midi_cmd_outgoing) == 0) {
+				spi_out_state = command_byte;
+			} else {
+				spi_out_state = midi_data;
+			}
+			break;
+		case filler:
+			SPDR = xyspi::pong;
+			if (spiMidiOut.count > 0) {
+				spi_out_state = command_byte;
+			}
+			break;
+		default:
+			SPDR = xyspi::null;
+			break;
+	}
 }
 
 void loop() {
