@@ -4,6 +4,7 @@
 
 #include <PCF8574mw.h>
 #include <PCF8591mw.h>
+#include <ADXL345mw.h>
 #include <common.h>
 
 #include "rgb_lempos.h"
@@ -19,6 +20,7 @@ constexpr uint8_t kButtonStateAdr = 0x38;
 constexpr uint8_t kAdcEnableAdr = 0x39;
 constexpr uint8_t kAdcAdr = 0x48;
 
+constexpr uint16_t xlm8rReadDelay_ms = 100;
 constexpr uint8_t debounceDelay_ms = 10;
 constexpr uint16_t longPressTime_ms = 500;
 
@@ -291,6 +293,83 @@ void checkPedal(const uint8_t which, const uint8_t reading) {
 	}
 }
 
+/*****************************************************
+ * XY CONTROL
+ *****************************************************/
+constexpr float kRadGrad = (180.0/M_PI);
+constexpr float kRad = (1.0/M_PI);
+
+struct axis_ctl {
+	axis_ctl(uint8_t _ctrl, int _min, int _max, uint8_t _ctrlMin, uint8_t _ctrlMax):
+			ctrl(_ctrl), minV(_min), maxV(_max), ctrlMin(_ctrlMin), ctrlMax(_ctrlMax), lastCV(255) {
+		factor = (ctrlMax != ctrlMin)? float(ctrlMax - ctrlMin)/float(maxV - minV) : 0;
+	}
+
+	void checkSend(int angle) {
+		if (angle < minV) angle = minV;
+		else if (angle > maxV) angle = maxV;
+		uint8_t cv = ctrlMin + (angle - minV) * factor;
+	 if (cv != lastCV) {
+#ifdef SERIAL_DEBUG
+			Serial.print("axus control "); Serial.print(ctrl); Serial.print(" angle "); Serial.print(angle);Serial.print(" minV "); Serial.print(minV);Serial.print(" maxV "); Serial.print(maxV);Serial.print(" factor "); Serial.print(factor);Serial.print(" cv "); Serial.println(cv);
+#endif 
+			//midiA.sendControlChange(ctrl, cv, outChannel);
+			//lamp.blink(2, 50);
+			lastCV = cv;
+		}
+	}
+	
+	uint8_t ctrl;
+	int minV; // assuming we range -180..180, and probably a smaller ambit than even 180
+	int maxV; // > min
+	uint8_t ctrlMin; // ctrl value at min 0..127
+	uint8_t ctrlMax; // ctrl value at max . may be > or < than CtrlMin
+	float factor;
+	uint8_t lastCV;
+ 
+};
+
+struct xl_joy {
+	xl_joy(uint8_t _activeButton,
+				uint8_t _pitchCtrl, int _pitchMin, int _pitchMax, uint8_t _pitchCtrlMin, uint8_t _pitchCtrlMax,
+				uint8_t _rollCtrl, int _rollMin, int _rollMax, uint8_t _rollCtrlMin, uint8_t _rollCtrlMax)
+		: lastReading_ms(0), activeButton(_activeButton),
+			pitch(_pitchCtrl, _pitchMin, _pitchMax, _pitchCtrlMin, _pitchCtrlMax),
+			roll(_rollCtrl, _rollMin, _rollMax, _rollCtrlMin, _rollCtrlMax) {}
+	
+	long lastReading_ms;
+	uint8_t activeButton;
+
+	struct axis_ctl pitch;
+	struct axis_ctl roll;
+};
+
+struct xl_joy xl{/* activate */ 2, /* pitch */	83, -45, 45, 0, 127, /* roll */ 84, -45, 45, 0, 127};
+adxl345::Interface<I2c> accelerometer(adxl345::kAddress1);
+
+void checkAccelerometer(adxl345::Interface<I2c> & xlm8r, struct xl_joy &xl) {
+	if (xlm8r.isValid && (xl.activeButton == 255 || buttons[xl.activeButton].pressed)) {
+		long theTime = millis();
+		if (theTime - xl.lastReading_ms > xlm8rReadDelay_ms) {
+			int16_t x, y, z;
+			xlm8r.readRaw(x, y, z);
+			adxl345::Vector v(x,y,z);
+/* filtered = filtered.lowPassFilter(v, 0.5); // Low Pass Filter to smooth out data. 0.1 - 0.9 */
+// convert to degrees: these are probably going to be simpler to work with if we need to configure on the fly through front panel
+			int pitch = -atan2(v.x, sqrt(v.y*v.y + v.z*v.z))*kRadGrad;
+			int roll	= atan2(v.y, v.z)*kRadGrad;
+#if defined(SERIAL_DEBUG) && SERIAL_DEBUG_LEVEL > 2
+			Serial.print("xyz ->");Serial.print(x); Serial.print(' '); Serial.print(y); Serial.print(' '); Serial.print(z);
+					Serial.print(" :: "); Serial.print(pitch); Serial.print(' '); Serial.println(roll);
+#endif
+			xl.pitch.checkSend(pitch);
+			xl.roll.checkSend(roll);
+			xl.lastReading_ms = theTime;
+		}
+	}
+}
+
+
 void setup() {
 
 #ifdef SERIAL_DEBUG
@@ -393,4 +472,6 @@ void loop() {
 		mask <<= 1;
 	}
 //	print_hex_byte(currentAdcEnables);
+	checkAccelerometer(accelerometer, xl);
+
 }
