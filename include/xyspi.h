@@ -26,3 +26,51 @@ namespace xyspi {
 	};
 
 };
+
+namespace config {
+	enum mode_t: uint8_t {
+		nieko = 0,
+		prog = 1,
+		ctrl = 2,
+		chanpress = 3,
+		keypress = 4,
+		note = 5,
+		start = 6,
+		stop = 7,
+		type = 0x07,
+		latch = 0x10,
+	};
+
+#pragma pack(push, 1)
+	struct button {
+		uint8_t chan;
+		uint8_t mode;
+		uint8_t val1;
+		uint8_t val2;
+		uint8_t long_mode;
+		uint8_t long_val1;
+		uint8_t long_val2;
+	};
+
+	struct pedal {
+		uint8_t chan;
+		uint8_t mode;
+		uint8_t which;
+		uint8_t min_val;
+		uint8_t max_val;
+	};
+
+	struct xlrm8r {
+		uint8_t chan;
+		uint8_t mode;
+		uint8_t which_x;
+		uint8_t min_x_val;
+		uint8_t max_x_val;
+		uint8_t which_y;
+		uint8_t min_y_val;
+		uint8_t max_y_val;
+	};
+
+#pragma pack(pop)
+
+};

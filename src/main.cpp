@@ -78,19 +78,6 @@ Lamp8574 statusLamp(adcEnable, 4);
  * mappings for button states
  */
 struct button {
-	enum mode_t: uint8_t {
-		nieko = 0,
-		prog = 1,
-		ctrl = 2,
-		chanpress = 3,
-		keypress = 4,
-		note = 5,
-		start = 6,
-		stop = 7,
-		type = 0x07,
-		latch = 0x10,
-	};
-
 	enum state_t: uint8_t {
 		open = 0,
 		pressed = 0x01,
@@ -99,9 +86,10 @@ struct button {
 		latching = 0x40 // latch state = latched|latching when first engaged, so the next button up will keep the latch
 	};
 
-	button(const uint8_t chan, const uint8_t md, const uint8_t v1, const uint8_t v2, const uint8_t lmd, const uint8_t lv1, const uint8_t lv2)
-	: lastBounceTime_ms(0), mode(md), val1(v1), val2(v2), long_mode(lmd), long_val1(lv1), long_val2(lv2),
-	  channel(chan), state(state_t::open), lastPressState(false) {}
+	button(config::button cfg)
+	: lastBounceTime_ms(0), mode(cfg.mode), val1(cfg.val1), val2(cfg.val2),
+	  long_mode(cfg.long_mode), long_val1(cfg.long_val1), long_val2(cfg.long_val2),
+	  channel(cfg.chan), state(state_t::open), lastPressState(false) {}
 
 	long lastBounceTime_ms;
 	long pressedTime_ms;
@@ -118,20 +106,20 @@ struct button {
 	bool lastPressState;
 };
 
-using btmode = button::mode_t;
+using btmode = config::mode_t;
 using btst8 = button::state_t;
 
-#define LATCH(X) ((button::mode_t)(X|btmode::latch))
+#define LATCH(X) ((config::mode_t)(X|btmode::latch))
 
 struct button buttons[] = {
-	{ 0, btmode::ctrl, 32, 127,			btmode::latch, 0, 0},
-	{ 0, btmode::note, 33, 80,			btmode::latch, 0, 0},
-	{ 0, LATCH(btmode::ctrl), 34, 80,	btmode::ctrl, 34, 120},
-	{ 0, btmode::prog, 35, 33,			btmode::latch, 0, 0},
-	{ 0, btmode::ctrl, 36, 120,			btmode::latch, 0, 0},
-	{ 0, btmode::note, 37, 80,			LATCH(btmode::keypress), 37, 100},
-	{ 0, btmode::start, 38, 120,		btmode::latch, 0, 0},
-	{ 0, btmode::nieko, 39, 120,		btmode::latch, 0, 0},
+	{{ 0, btmode::ctrl, 32, 127,		btmode::latch, 0, 0}},
+	{{ 0, btmode::note, 33, 80,			btmode::latch, 0, 0}},
+	{{ 0, LATCH(btmode::ctrl), 34, 80,	btmode::ctrl, 34, 120}},
+	{{ 0, btmode::prog, 35, 33,			btmode::latch, 0, 0}},
+	{{ 0, btmode::ctrl, 36, 120,		btmode::latch, 0, 0}},
+	{{ 0, btmode::note, 37, 80,			LATCH(btmode::keypress), 37, 100}},
+	{{ 0, btmode::start, 38, 120,		btmode::latch, 0, 0}},
+	{{ 0, btmode::nieko, 39, 120,		btmode::latch, 0, 0}},
 };
 constexpr uint8_t nButtons = sizeof(buttons)/sizeof(button);
 
@@ -139,21 +127,21 @@ constexpr uint8_t nButtons = sizeof(buttons)/sizeof(button);
  * mappings for pedals
  */
 struct pedal {
-	pedal(byte _ctrl, byte _midiChannel)
-	: lastChangeTime_ms(0), ctrl(_ctrl), midiChannel(_midiChannel), lastVal(255), lastVal2(255) {}
+	pedal(config::pedal cfg)
+	: lastChangeTime_ms(0), ctrl(cfg.which), midiChannel(cfg.chan), lastVal(255), lastVal2(255) {}
 
 	long lastChangeTime_ms;
-	byte ctrl;
+	uint8_t ctrl;
 	uint8_t midiChannel;
 
-	byte lastVal;
-	byte lastVal2;
+	uint8_t lastVal;
+	uint8_t lastVal2;
 };
 
 struct pedal pedals[] = {
-	{ 85, 0 },
-	{ 86, 0 },
-	{ 87, 0 }
+	{{ 0, btmode::ctrl, 85, 0, 127 }},
+	{{ 0, btmode::ctrl, 86, 0, 127 }},
+	{{ 0, btmode::ctrl, 87, 0, 127 }}
 };
 constexpr uint8_t nPedals = sizeof(pedals)/sizeof(pedal);
 
