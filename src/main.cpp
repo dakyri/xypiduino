@@ -34,6 +34,8 @@ RGBLempos lamps(19, 21, 20);
 PCF8574<I2c> buttonStates(kButtonStateAdr);
 PCF8574<I2c> adcEnable(kAdcEnableAdr);
 PCF8591<I2c> adc(kAdcAdr);
+adxl345::Interface<I2c> accelerometer(adxl345::kAddress1);
+
 
 /*!
  * wraps an common anode rgb led on the given bit of an 8574
@@ -87,19 +89,32 @@ struct button {
 	};
 
 	button(config::button cfg)
-	: lastBounceTime_ms(0), mode(cfg.mode), val1(cfg.val1), val2(cfg.val2),
-	  long_mode(cfg.long_mode), long_val1(cfg.long_val1), long_val2(cfg.long_val2),
-	  channel(cfg.chan), state(state_t::open), lastPressState(false) {}
+		: lastBounceTime_ms(0), mode(cfg.mode), val1(cfg.val1), val2(cfg.val2),
+		long_mode(cfg.long_mode), long_val1(cfg.long_val1), long_val2(cfg.long_val2),
+		channel(cfg.chan), state(state_t::open), lastPressState(false) {}
+
+	void set(config::button &cfg) {
+		lastBounceTime_ms = 0;
+		mode = cfg.mode;
+		val1 = cfg.val1;
+		val2 = cfg.val2;
+		long_mode = cfg.long_mode;
+		long_val1 = cfg.long_val1;
+		long_val2 = cfg.long_val2;
+		channel = cfg.chan;
+		state = state_t::open;
+		lastPressState = false;		
+	}
 
 	long lastBounceTime_ms;
 	long pressedTime_ms;
-	const uint8_t mode;
-	const uint8_t val1;
-	const uint8_t val2;
-	const uint8_t long_mode;
-	const uint8_t long_val1;
-	const uint8_t long_val2;
-	const uint8_t channel;
+	uint8_t mode;
+	uint8_t val1;
+	uint8_t val2;
+	uint8_t long_mode;
+	uint8_t long_val1;
+	uint8_t long_val2;
+	uint8_t channel;
 	uint8_t active_type;
 	uint8_t active_val1;
 	uint8_t state;
@@ -129,6 +144,14 @@ constexpr uint8_t nButtons = sizeof(buttons)/sizeof(button);
 struct pedal {
 	pedal(config::pedal cfg)
 	: lastChangeTime_ms(0), ctrl(cfg.which), midiChannel(cfg.chan), lastVal(255), lastVal2(255) {}
+
+	void set(config::pedal &cfg) {
+		lastChangeTime_ms = 0;
+		lastVal = 255;
+		lastVal2 = 255;
+		ctrl = cfg.which;
+		midiChannel = cfg.chan;
+	}
 
 	long lastChangeTime_ms;
 	uint8_t ctrl;
@@ -273,12 +296,9 @@ void checkPedal(const uint8_t which, const uint8_t reading) {
 				ped.lastVal = ctrlVal;
 				ped.lastChangeTime_ms = theTime;
 				midiA.sendControlChange(ped.ctrl, ctrlVal, ped.midiChannel);
-				statusLamp.setColor(Lamp8574::red, 100);
-				/*
 				if (potChangeT_ms > 200) {
-					lamp.blink(3, 50);
+					statusLamp.setColor(Lamp8574::red, 50);
 				}
-				*/
 			}
 		}
 	}
@@ -291,8 +311,19 @@ constexpr float kRadGrad = (180.0/M_PI);
 constexpr float kRad = (1.0/M_PI);
 
 struct axis_ctl {
-	axis_ctl(uint8_t _ctrl, int _min, int _max, uint8_t _ctrlMin, uint8_t _ctrlMax):
-			ctrl(_ctrl), minV(_min), maxV(_max), ctrlMin(_ctrlMin), ctrlMax(_ctrlMax), lastCV(255) {
+	axis_ctl(uint8_t _mode, uint8_t _chan, uint8_t _ctrl, int _min, int _max, uint8_t _ctrlMin, uint8_t _ctrlMax) {
+		set(_mode, _chan, _ctrl, _min, _max, _ctrlMin, _ctrlMax);
+	}
+
+	void set(uint8_t _mode, uint8_t _chan, uint8_t _ctrl, int _min, int _max, uint8_t _ctrlMin, uint8_t _ctrlMax) {
+		mode = _mode;
+		chan = _chan;
+		ctrl = _ctrl;
+		minV = _min;
+		maxV = _max;
+		ctrlMin = _ctrlMin;
+		ctrlMax = _ctrlMax;
+		lastCV = 255;
 		factor = (ctrlMax != ctrlMin)? float(ctrlMax - ctrlMin)/float(maxV - minV) : 0;
 	}
 
@@ -304,12 +335,14 @@ struct axis_ctl {
 #ifdef SERIAL_DEBUG
 			Serial.print("axus control "); Serial.print(ctrl); Serial.print(" angle "); Serial.print(angle);Serial.print(" minV "); Serial.print(minV);Serial.print(" maxV "); Serial.print(maxV);Serial.print(" factor "); Serial.print(factor);Serial.print(" cv "); Serial.println(cv);
 #endif 
-			//midiA.sendControlChange(ctrl, cv, outChannel);
-			//lamp.blink(2, 50);
+			midiA.sendControlChange(ctrl, cv, chan);
+			statusLamp.setColor(Lamp8574::blue, 50);
 			lastCV = cv;
 		}
 	}
 	
+	uint8_t mode;
+	uint8_t chan;
 	uint8_t ctrl;
 	int minV; // assuming we range -180..180, and probably a smaller ambit than even 180
 	int maxV; // > min
@@ -321,12 +354,16 @@ struct axis_ctl {
 };
 
 struct xl_joy {
-	xl_joy(uint8_t _activeButton,
-				uint8_t _pitchCtrl, int _pitchMin, int _pitchMax, uint8_t _pitchCtrlMin, uint8_t _pitchCtrlMax,
-				uint8_t _rollCtrl, int _rollMin, int _rollMax, uint8_t _rollCtrlMin, uint8_t _rollCtrlMax)
-		: lastReading_ms(0), activeButton(_activeButton),
-			pitch(_pitchCtrl, _pitchMin, _pitchMax, _pitchCtrlMin, _pitchCtrlMax),
-			roll(_rollCtrl, _rollMin, _rollMax, _rollCtrlMin, _rollCtrlMax) {}
+	xl_joy(config::xlrm8r cfg)
+		: lastReading_ms(0), activeButton(cfg.enable_button),
+		pitch(cfg.mode_x, cfg.chan, cfg.which_x, cfg.min_ambit_x, cfg.max_ambit_x, cfg.min_x_val, cfg.max_x_val),
+		roll(cfg.mode_y, cfg.chan, cfg.which_y, cfg.min_ambit_y, cfg.max_ambit_y, cfg.min_y_val, cfg.max_y_val) {}
+
+	void set(config::xlrm8r &cfg) {
+		activeButton = cfg.enable_button;
+		pitch.set(cfg.mode_x, cfg.chan, cfg.which_x, cfg.min_ambit_x, cfg.max_ambit_x, cfg.min_x_val, cfg.max_x_val),
+		roll.set(cfg.mode_y, cfg.chan, cfg.which_y, cfg.min_ambit_y, cfg.max_ambit_y, cfg.min_y_val, cfg.max_y_val);
+	}
 	
 	long lastReading_ms;
 	uint8_t activeButton;
@@ -335,8 +372,10 @@ struct xl_joy {
 	struct axis_ctl roll;
 };
 
-struct xl_joy xl{/* activate */ 2, /* pitch */	83, -45, 45, 0, 127, /* roll */ 84, -45, 45, 0, 127};
-adxl345::Interface<I2c> accelerometer(adxl345::kAddress1);
+struct xl_joy xlmr8rs[] = {
+	{{0, 2, /* pitch */	btmode::ctrl, 83, -45, 45, 0, 127, /* roll */ btmode::ctrl, 84, -45, 45, 0, 127}}
+};
+constexpr uint8_t nXlmr8rs = sizeof(xlmr8rs)/sizeof(xl_joy);
 
 void checkAccelerometer(adxl345::Interface<I2c> & xlm8r, struct xl_joy &xl) {
 	if (xlm8r.isValid && (xl.activeButton == 255 || buttons[xl.activeButton].pressed)) {
@@ -360,6 +399,226 @@ void checkAccelerometer(adxl345::Interface<I2c> & xlm8r, struct xl_joy &xl) {
 	}
 }
 
+
+/*********************************************
+ * SPI HANDLER
+ *********************************************/
+MidiRingBuffer<32> spiMidiIn;
+MidiRingBuffer<32> spiMidiOut;
+
+/*!
+ * the spi interrupt routine is a pair of ad hoc state machines, with these states
+ */
+enum spi_io_state_t: uint8_t {
+	command_byte = 0,	//!< processing a command byte
+	midi_data = 1,		//!< processing midi bytes
+	midi_data_1 = 2,		//!< processing midi bytes
+	midi_data_2 = 3,		//!< processing midi bytes
+	tempo_data = 4,
+	tempo_data_1 = 5,
+	tempo_data_2 = 6,
+	tempo_data_3 = 7,
+	config_btn_id = 8,
+	config_btn_len = 9,
+	config_btn_dta = 10,
+	config_ped_id = 11,
+	config_ped_len = 12,
+	config_ped_dta = 13,
+	config_xlr_id = 14,
+	config_xlr_len = 15,
+	config_xlr_dta = 16,
+	config_skip = 17,
+	filler = 18
+};
+
+spi_io_state_t spi_in_state = command_byte;
+spi_io_state_t spi_out_state = command_byte;
+uint8_t n_midi_cmd_incoming = 0, n_midi_cmd_outgoing = 0;
+uint8_t cmd_in = 0, val1_in = 0, val2_in = 0;
+bool dropped_midi_in = false;
+uint8_t cmd_out = 0, val1_out = 0, val2_out = 0;
+uint8_t config_id = 0;
+uint8_t config_len = 0;
+uint8_t config_idx = 0;
+uint8_t config_data[max(sizeof(config::xlrm8r), sizeof(config::button))];
+bool rescan_requested = false;
+
+ISR (SPI_STC_vect)
+{
+	bool was_pinged = false;
+	uint8_t scrap = 0;
+	switch (spi_in_state) {
+		case command_byte: {
+			uint8_t cmd = SPDR;
+			if (cmd & xyspi::midi) {
+				spi_in_state = midi_data;
+				n_midi_cmd_incoming = cmd & 0x7f;
+			} else {
+				switch (cmd) {
+					case xyspi::null:
+						break;
+					case xyspi::ping:
+						was_pinged = true;
+						break;
+					case xyspi::pong:
+						break;
+					case xyspi::rescan:
+						rescan_requested = true;
+						break;
+					case xyspi::tempo:
+						spi_in_state = tempo_data;
+						break;
+					case xyspi::cfg_button:
+						spi_in_state = config_btn_id;
+						break;
+					case xyspi::cfg_pedal:
+						spi_in_state = config_ped_id;
+						break;
+					case xyspi::cfg_xlrm8:
+						spi_in_state = config_xlr_id;
+						break;
+				}
+			}
+			break;
+		}
+		case midi_data:
+			cmd_in = SPDR;
+			spi_in_state = midi_data_1;
+			break;
+		case midi_data_1:
+			val1_in = SPDR;
+			spi_in_state = midi_data_2;
+			break;
+		case midi_data_2:
+			val2_in =SPDR;
+			if (!spiMidiIn.addToBuf(cmd_in, val1_in, val2_in)) {
+				dropped_midi_in = true;
+			}
+			spi_in_state = (--n_midi_cmd_incoming > 0)? midi_data: command_byte;
+			break;
+		case tempo_data:
+			spi_in_state = tempo_data_1;
+			break;
+		case tempo_data_1:
+			spi_in_state = tempo_data_2;
+			break;
+		case tempo_data_2:
+			spi_in_state = tempo_data_3;
+			break;
+		case tempo_data_3:
+			spi_in_state = command_byte;
+			break;
+		case config_btn_id:
+			config_id = SPDR;
+			spi_in_state = config_btn_len;
+			break;
+		case config_btn_len:
+			config_len = SPDR;
+			config_idx = 0;
+			spi_in_state = (config_len == sizeof(config::button))? config_btn_dta : config_skip;
+			break;
+		case config_btn_dta:
+			config_data[config_idx++] = SPDR;
+			if ((--config_len) <= 0) {
+				spi_in_state = command_byte;
+				if (config_id < nButtons) {
+					buttons[config_id].set(*((config::button*)config_data));
+				}
+			}
+			break;
+		case config_ped_id:
+			config_id = SPDR;
+			spi_in_state = config_ped_len;
+			break;
+		case config_ped_len:
+			config_len = SPDR;
+			config_idx = 0;
+			spi_in_state = (config_len == sizeof(config::pedal))? config_ped_dta : config_skip;
+			break;
+		case config_ped_dta:
+			config_data[config_idx++] = SPDR;
+			if ((--config_len) <= 0) {
+				spi_in_state = command_byte;
+				if (config_id < nPedals) {
+					pedals[config_id].set(*((config::pedal*)config_data));
+				}
+			}
+			break;
+		case config_xlr_id:
+			config_id = SPDR;
+			spi_in_state = config_xlr_len;
+			break;
+		case config_xlr_len:
+			config_len = SPDR;
+			config_idx = 0;
+			spi_in_state = (config_len == sizeof(config::xlrm8r))? config_xlr_dta : config_skip;
+			break;
+		case config_xlr_dta:
+			config_data[config_idx++] = SPDR;
+			if ((--config_len) <= 0) {
+				spi_in_state = command_byte;
+				if (config_id < nXlmr8rs) {
+					xlmr8rs[config_id].set(*((config::xlrm8r*)config_data));
+				}
+			}
+			break;
+		case config_skip:
+			scrap = SPDR;
+			if ((--config_len) <= 0) spi_in_state = command_byte;
+			break;
+		case filler:
+			spi_in_state = filler;
+			break;
+		default:
+			spi_in_state = command_byte;
+			break;
+	}
+
+	switch (spi_out_state) {
+		case command_byte: {
+			n_midi_cmd_outgoing = spiMidiOut.count;
+			if (n_midi_cmd_outgoing > 0) {
+				SPDR = (xyspi::midi | n_midi_cmd_outgoing);
+				spi_out_state = midi_data;
+			} else {
+				SPDR = xyspi::pong;
+				spi_out_state = filler;
+			}
+			break;
+		}
+		case midi_data:
+			spiMidiOut.getFromBuf(cmd_out, val1_out, val2_out);
+			SPDR = cmd_out;
+			spi_out_state = midi_data_1;
+			break;
+		case midi_data_1:
+			SPDR = val1_out;
+			spi_out_state = midi_data_2;
+			break;
+		case midi_data_2:
+			SPDR = val2_out;
+			if ((--n_midi_cmd_outgoing) <= 0) {
+				spi_out_state = command_byte;
+			} else {
+				spi_out_state = midi_data;
+			}
+			break;
+		case filler:
+			if (spiMidiOut.count > 0) {
+				spi_out_state = command_byte;
+				SPDR = xyspi::null; // keep talking!
+			} else {
+				SPDR = xyspi::pong;
+				if (was_pinged) {
+					spi_out_state = command_byte;
+				}
+			}
+			break;
+		default:
+			SPDR = xyspi::null;
+			break;
+	}
+}
 
 void setup() {
 
@@ -435,167 +694,6 @@ void setup() {
 	SPI.attachInterrupt();
 }
 
-
-MidiRingBuffer<32> spiMidiIn;
-MidiRingBuffer<32> spiMidiOut;
-
-/*!
- * the spi interrupt routine is a pair of ad hoc state machines, with these states
- */
-enum spi_io_state_t: uint8_t {
-	command_byte = 0,	//!< processing a command byte
-	midi_data = 1,		//!< processing midi bytes
-	midi_data_1 = 2,		//!< processing midi bytes
-	midi_data_2 = 3,		//!< processing midi bytes
-	tempo_data = 4,
-	tempo_data_1 = 5,
-	tempo_data_2 = 6,
-	tempo_data_3 = 7,
-	config_btn_id = 8,
-	config_btn_len = 9,
-	config_btn_dta = 10,
-	config_ped_id = 11,
-	config_ped_len = 12,
-	config_ped_dta = 13,
-	config_xlr_id = 14,
-	config_xlr_len = 15,
-	config_xlr_dta = 16,
-	filler = 17
-};
-spi_io_state_t spi_in_state = command_byte;
-spi_io_state_t spi_out_state = command_byte;
-uint8_t n_midi_cmd_incoming = 0, n_midi_cmd_outgoing = 0;
-uint8_t cmd_in = 0, val1_in = 0, val2_in = 0;
-bool dropped_midi_in = false;
-uint8_t cmd_out = 0, val1_out = 0, val2_out = 0;
-
-ISR (SPI_STC_vect)
-{
-	switch (spi_in_state) {
-		case command_byte: {
-			uint8_t cmd = SPDR;
-			if (cmd & xyspi::midi) {
-				spi_in_state = midi_data;
-				n_midi_cmd_incoming = cmd & 0x7f;
-			} else {
-				switch (cmd) {
-					case xyspi::null:
-						break;
-					case xyspi::ping:
-						break;
-					case xyspi::pong:
-						break;
-					case xyspi::rescan:
-						break;
-					case xyspi::tempo:
-						break;
-				}
-			}
-			break;
-		}
-		case midi_data:
-			cmd_in = SPDR;
-			spi_in_state = midi_data_1;
-			break;
-		case midi_data_1:
-			val1_in = SPDR;
-			spi_in_state = midi_data_2;
-			break;
-		case midi_data_2:
-			val2_in =SPDR;
-			if (!spiMidiIn.addToBuf(cmd_in, val1_in, val2_in)) {
-				dropped_midi_in = true;
-			}
-			spi_in_state = midi_data;
-			break;
-		case tempo_data:
-			spi_in_state = tempo_data_1;
-			break;
-		case tempo_data_1:
-			spi_in_state = tempo_data_2;
-			break;
-		case tempo_data_2:
-			spi_in_state = tempo_data_3;
-			break;
-		case tempo_data_3:
-			spi_in_state = command_byte;
-			break;
-		case config_btn_id:
-			spi_in_state = config_btn_len;
-			break;
-		case config_btn_len:
-			spi_in_state = config_btn_dta;
-			break;
-		case config_btn_dta:
-			spi_in_state = command_byte;
-			break;
-		case config_ped_id:
-			spi_in_state = config_ped_len;
-			break;
-		case config_ped_len:
-			spi_in_state = config_ped_dta;
-			break;
-		case config_ped_dta:
-			spi_in_state = command_byte;
-			break;
-		case config_xlr_id:
-			spi_in_state = config_xlr_len;
-			break;
-		case config_xlr_len:
-			spi_in_state = config_xlr_dta;
-			break;
-		case config_xlr_dta:
-			spi_in_state = command_byte;
-			break;
-		case filler:
-			spi_in_state = filler;
-			break;
-		default:
-			spi_in_state = command_byte;
-			break;
-	}
-
-	switch (spi_out_state) {
-		case command_byte: {
-			n_midi_cmd_outgoing = spiMidiOut.count;
-			if (n_midi_cmd_outgoing > 0) {
-				SPDR = (xyspi::midi | n_midi_cmd_outgoing);
-				spi_out_state = midi_data;
-			} else {
-				SPDR = xyspi::pong;
-				spi_out_state = filler;
-			}
-			break;
-		}
-		case midi_data:
-			spiMidiOut.getFromBuf(cmd_out, val1_out, val2_out);
-			SPDR = cmd_out;
-			spi_out_state = midi_data_1;
-			break;
-		case midi_data_1:
-			SPDR = val1_out;
-			spi_out_state = midi_data_2;
-			break;
-		case midi_data_2:
-			SPDR = val2_out;
-			if ((--n_midi_cmd_outgoing) == 0) {
-				spi_out_state = command_byte;
-			} else {
-				spi_out_state = midi_data;
-			}
-			break;
-		case filler:
-			SPDR = xyspi::pong;
-			if (spiMidiOut.count > 0) {
-				spi_out_state = command_byte;
-			}
-			break;
-		default:
-			SPDR = xyspi::null;
-			break;
-	}
-}
-
 void loop() {
 	statusLamp.checkBlink();
 	if (midiA.read()) {
@@ -629,6 +727,6 @@ void loop() {
 		mask <<= 1;
 	}
 //	print_hex_byte(currentAdcEnables);
-	checkAccelerometer(accelerometer, xl);
+	checkAccelerometer(accelerometer, xlmr8rs[0]);
 
 }

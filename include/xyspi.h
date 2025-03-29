@@ -61,13 +61,19 @@ namespace config {
 	};
 
 	struct xlrm8r {
-		uint8_t chan;
-		uint8_t mode;
-		uint8_t which_x;
-		uint8_t min_x_val;
+		uint8_t chan;			// midi channel
+		uint8_t enable_button;	// which panel button, if any, enables it.
+		uint8_t mode_x;			// pitch, actually. ctrl or maybe pressure or even note
+		uint8_t which_x;		// controller or maybe note number
+		int8_t	min_ambit_x;	// ambit in range -127 -> 127 ... probably -45 -> +45  is the most useful
+		int8_t	max_ambit_x;
+		uint8_t min_x_val;		// some part of the range 0-127
 		uint8_t max_x_val;
-		uint8_t which_y;
-		uint8_t min_y_val;
+		uint8_t mode_y;			// roll, actually. ctrl or maybe pressure or even note
+		uint8_t which_y;		// controller or maybe note number
+		int8_t	min_ambit_y;	// ambit in range -127 -> 127 ... probably -45 -> +45  is the most useful
+		int8_t	max_ambit_y;
+		uint8_t min_y_val; 		// some part of the range 0-127
 		uint8_t max_y_val;
 	};
 
