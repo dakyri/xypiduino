@@ -403,8 +403,8 @@ void checkAccelerometer(adxl345::Interface<I2c> & xlm8r, struct xl_joy &xl) {
 /*********************************************
  * SPI HANDLER
  *********************************************/
-MidiRingBuffer<32> spiMidiIn;
-MidiRingBuffer<32> spiMidiOut;
+MidiRingBuffer<32> spiMidiIn; // midi coming from the pi via SPI
+MidiRingBuffer<32> spiMidiOut; // midi going to the pi via SPI
 
 /*!
  * the spi interrupt routine is a pair of ad hoc state machines, with these states
@@ -620,6 +620,9 @@ ISR (SPI_STC_vect)
 	}
 }
 
+/************************************************************
+ * MAIN INIT
+ ************************************************************/
 void setup() {
 
 #ifdef SERIAL_DEBUG
@@ -694,6 +697,9 @@ void setup() {
 	SPI.attachInterrupt();
 }
 
+/************************************************************
+ * MAIN LOOP
+ ************************************************************/
 void loop() {
 	statusLamp.checkBlink();
 	if (midiA.read()) {
@@ -703,8 +709,63 @@ void loop() {
 		Serial.print(midiA.getData2(), HEX);Serial.print(' ');
 		Serial.println(midiA.getChannel(), HEX);
 #endif
+		uint8_t midi_typ = midiA.getType();
+		switch (midi_typ) {
+			case midi::NoteOn:
+			case midi::NoteOff:
+			case midi::ControlChange:
+			case midi::ProgramChange:
+			case midi::AfterTouchChannel:
+			case midi::AfterTouchPoly:
+				spiMidiOut.addToBuf(midi_typ|(midiA.getChannel()-1), midiA.getData1(), midiA.getData2());
+				statusLamp.setColor(Lamp8574::blue, 50);
+				break;
+
+			case midi::PitchBend:
+				break;
+
+			case midi::Clock:
+				break;
+
+			case midi::Start:
+			case midi::Stop:
+			case midi::Continue:
+				spiMidiOut.addToBuf(midi_typ, 0, 0);
+				statusLamp.setColor(Lamp8574::blue, 50);
+				break;
+		}
 	} else {
 //		Serial.println("nope");
+	}
+	while (spiMidiIn.count > 0) {
+		uint8_t cmd, chan, val1, val2;
+		spiMidiIn.getFromBuf(cmd, val1, val2);
+		chan = (cmd & 0xf) + 1;
+		cmd &= 0xf0;
+		switch (cmd) {
+			case midi::NoteOn:
+			case midi::NoteOff:
+			case midi::ControlChange:
+			case midi::ProgramChange:
+			case midi::AfterTouchChannel:
+			case midi::AfterTouchPoly:
+				midiA.send(static_cast<midi::MidiType>(cmd), val1, val2, chan);
+				statusLamp.setColor(Lamp8574::red, 50);
+				break;
+
+			case midi::PitchBend:
+				break;
+				
+			case midi::Clock:
+				break;
+
+			case midi::Start:
+			case midi::Stop:
+			case midi::Continue:
+				midiA.sendRealTime(static_cast<midi::MidiType>(cmd));
+				statusLamp.setColor(Lamp8574::red, 50);
+				break;
+		}
 	}
 
 	const uint8_t currentButtons = buttonStates.getInputs();

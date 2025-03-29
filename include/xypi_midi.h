@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-namespace xyspi {
+namespace midi {
 	enum class bus_cmd: uint8_t {
 		greets = 'h',
 		sendMidiAny = '0', // or every
@@ -31,8 +31,8 @@ namespace xyspi {
 	inline uint8_t getCCCmd(uint8_t _byte) { return (_byte & 0xf0); }
 	inline uint8_t getCCChan(uint8_t _byte) { return (_byte & 0x0f); }
 
-	enum class midi_cmd : uint8_t {
-		not			= 0x00,
+	enum class cmd : uint8_t {
+		nul			= 0x00,
 		noteOff		= 0x80,
 		noteOn		= 0x90,
 		keyPress	= 0xa0,
