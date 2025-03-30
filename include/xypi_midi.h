@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-namespace midi {
+namespace xy_mdi {
 	enum class bus_cmd: uint8_t {
 		greets = 'h',
 		sendMidiAny = '0', // or every
@@ -56,11 +56,11 @@ namespace midi {
 		sysReset	= 0xff
 	};
 
-	inline uint8_t operator | (midi_cmd op, uint8_t t) { return static_cast<uint8_t>(op) | t; }
-	inline uint8_t operator & (midi_cmd op, uint8_t t) { return static_cast<uint8_t>(op) & t; }
-	inline uint8_t operator ^ (midi_cmd op, uint8_t t) { return static_cast<uint8_t>(op) ^ t; }
-	inline uint8_t ot(midi_cmd op) { return static_cast<uint8_t>(op); }
-	inline midi_cmd ot(uint8_t op) { return static_cast<midi_cmd>(op); }
+	inline uint8_t operator | (cmd op, uint8_t t) { return static_cast<uint8_t>(op) | t; }
+	inline uint8_t operator & (cmd op, uint8_t t) { return static_cast<uint8_t>(op) & t; }
+	inline uint8_t operator ^ (cmd op, uint8_t t) { return static_cast<uint8_t>(op) ^ t; }
+	inline uint8_t ot(cmd op) { return static_cast<uint8_t>(op); }
+	inline cmd ot(uint8_t op) { return static_cast<cmd>(op); }
 
 	enum class midi_ctrl : uint8_t {
 		modulation		= 0x01,
@@ -108,22 +108,22 @@ namespace midi {
 	struct midi_t {
 		midi_t() : cmd(0), val({0}) { }
 
-		void noteon(uint8_t chan, uint8_t note, uint8_t vel) { cmd = midi_cmd::noteOn | (chan & 0xf); val.note.pitch = note; val.note.vel = vel; }
-		void noteon(uint8_t args[3]) { cmd = midi_cmd::noteOn | (args[0] & 0xf); val.note.pitch = args[1]; val.note.vel = args[2]; }
-		void noteoff(uint8_t chan, uint8_t note, uint8_t vel) { cmd = midi_cmd::noteOff | (chan & 0xf); val.note.pitch = note; val.note.vel = vel; }
-		void keypress(uint8_t chan, uint8_t note, uint8_t vel) { cmd = midi_cmd::keyPress | (chan & 0xf); val.note.pitch = note; val.note.vel = vel; }
-		void control(uint8_t chan, uint8_t tgt, uint8_t amt) { cmd = midi_cmd::ctrl | (chan & 0xf); val.ctrl.tgt = tgt; val.ctrl.amt = amt; }
-		void prog(uint8_t chan, uint8_t prog) { cmd = midi_cmd::prog | (chan & 0xf); val.prog = prog; }
-		void chanpress(uint8_t chan, uint8_t press) { cmd = midi_cmd::chanPress | (chan & 0xf); val.press = press; }
-		void bend(uint8_t chan, uint16_t bend) { cmd = midi_cmd::bend | (chan & 0xf); val.bend = bend; }
-		void timecode(uint8_t typ, uint8_t v) { cmd = ot(midi_cmd::timeCode); val.time_code.type = typ; val.time_code.val = v; }
-		void songpos(uint16_t pos) { cmd = ot(midi_cmd::songPos); val.song_pos = pos; }
-		void songsel(uint8_t sel) { cmd = ot(midi_cmd::songSel); val.song_sel = sel; }
-		void tune() { cmd = ot(midi_cmd::tuneReq); }
-		void clock() { cmd = ot(midi_cmd::clock); }
-		void start() { cmd = ot(midi_cmd::start); }
-		void cont() { cmd = ot(midi_cmd::cont); }
-		void stop() { cmd = ot(midi_cmd::stop); }
+		void noteon(uint8_t chan, uint8_t note, uint8_t vel) { cmd = cmd::noteOn | (chan & 0xf); val.note.pitch = note; val.note.vel = vel; }
+		void noteon(uint8_t args[3]) { cmd = cmd::noteOn | (args[0] & 0xf); val.note.pitch = args[1]; val.note.vel = args[2]; }
+		void noteoff(uint8_t chan, uint8_t note, uint8_t vel) { cmd = cmd::noteOff | (chan & 0xf); val.note.pitch = note; val.note.vel = vel; }
+		void keypress(uint8_t chan, uint8_t note, uint8_t vel) { cmd = cmd::keyPress | (chan & 0xf); val.note.pitch = note; val.note.vel = vel; }
+		void control(uint8_t chan, uint8_t tgt, uint8_t amt) { cmd = cmd::ctrl | (chan & 0xf); val.ctrl.tgt = tgt; val.ctrl.amt = amt; }
+		void prog(uint8_t chan, uint8_t prog) { cmd = cmd::prog | (chan & 0xf); val.prog = prog; }
+		void chanpress(uint8_t chan, uint8_t press) { cmd = cmd::chanPress | (chan & 0xf); val.press = press; }
+		void bend(uint8_t chan, uint16_t bend) { cmd = cmd::bend | (chan & 0xf); val.bend = bend; }
+		void timecode(uint8_t typ, uint8_t v) { cmd = ot(cmd::timeCode); val.time_code.type = typ; val.time_code.val = v; }
+		void songpos(uint16_t pos) { cmd = ot(cmd::songPos); val.song_pos = pos; }
+		void songsel(uint8_t sel) { cmd = ot(cmd::songSel); val.song_sel = sel; }
+		void tune() { cmd = ot(cmd::tuneReq); }
+		void clock() { cmd = ot(cmd::clock); }
+		void start() { cmd = ot(cmd::start); }
+		void cont() { cmd = ot(cmd::cont); }
+		void stop() { cmd = ot(cmd::stop); }
 
 		uint8_t channel() { return cmd & 0xf; }
 

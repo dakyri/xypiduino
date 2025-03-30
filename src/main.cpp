@@ -14,6 +14,7 @@
 
 #define SERIAL_DEBUG
 #define SERIAL_DEBUG_LEVEL 1
+#define ENABLE_SPI
 
 midi::MidiInterface<HardwareSerial> midiA((HardwareSerial&)Serial1);
 
@@ -36,6 +37,10 @@ PCF8574<I2c> adcEnable(kAdcEnableAdr);
 PCF8591<I2c> adc(kAdcAdr);
 adxl345::Interface<I2c> accelerometer(adxl345::kAddress1);
 
+MidiRingBuffer<32> deviceMidiOut; // midi going to the duino midi out, coming from the pi via SPI, buttons, pedal, and stuff
+#ifdef ENABLE_SPI
+MidiRingBuffer<32> spiMidiOut; // midi going to the pi via SPI, includes the pedals, buttons and accelerometers
+#endif
 
 /*!
  * wraps an common anode rgb led on the given bit of an 8574
@@ -76,6 +81,13 @@ protected:
 
 Lamp8574 statusLamp(adcEnable, 4);
 
+using btmode = config::mode_t;
+
+bool do_close = false;
+bool close_mode = btmode::nieko;
+bool close_chan = 0;
+bool close_val1 = 0;
+
 /*!
  * mappings for button states
  */
@@ -93,7 +105,16 @@ struct button {
 		long_mode(cfg.long_mode), long_val1(cfg.long_val1), long_val2(cfg.long_val2),
 		channel(cfg.chan), state(state_t::open), lastPressState(false) {}
 
-	void set(config::button &cfg) {
+	/*!
+	 * might be called from an ISR
+	 */
+	void set(config::button &cfg, bool and_close) {
+		if (and_close) {
+			close_mode = mode;
+			close_chan = channel;
+			close_val1 = val1;
+			do_close = true;
+		}
 		lastBounceTime_ms = 0;
 		mode = cfg.mode;
 		val1 = cfg.val1;
@@ -121,9 +142,6 @@ struct button {
 	bool lastPressState;
 };
 
-using btmode = config::mode_t;
-using btst8 = button::state_t;
-
 #define LATCH(X) ((config::mode_t)(X|btmode::latch))
 
 struct button buttons[] = {
@@ -137,25 +155,28 @@ struct button buttons[] = {
 	{{ 0, btmode::nieko, 39, 120,		btmode::latch, 0, 0}},
 };
 constexpr uint8_t nButtons = sizeof(buttons)/sizeof(button);
+using btst8 = button::state_t;
 
 /*!
  * mappings for pedals
  */
 struct pedal {
 	pedal(config::pedal cfg)
-	: lastChangeTime_ms(0), ctrl(cfg.which), midiChannel(cfg.chan), lastVal(255), lastVal2(255) {}
+	: lastChangeTime_ms(0), mode(cfg.mode), ctrl(cfg.which), chan(cfg.chan), lastVal(255), lastVal2(255) {}
 
 	void set(config::pedal &cfg) {
 		lastChangeTime_ms = 0;
 		lastVal = 255;
 		lastVal2 = 255;
 		ctrl = cfg.which;
-		midiChannel = cfg.chan;
+		mode = cfg.mode;
+		chan = cfg.chan;
 	}
 
 	long lastChangeTime_ms;
+	uint8_t mode;
 	uint8_t ctrl;
-	uint8_t midiChannel;
+	uint8_t chan;
 
 	uint8_t lastVal;
 	uint8_t lastVal2;
@@ -176,52 +197,68 @@ constexpr uint8_t lmpBtLatchCol = color::blue;
  */
 
  void sendButtonOnMidi(uint8_t typ, uint8_t chan, uint8_t v1, uint8_t v2) {
-	bool sent = false;
+	uint8_t cmd = btmode::nieko;
 	switch (typ) {
 		case btmode::prog:
-			midiA.sendProgramChange(v1, chan); sent = true;
+			cmd = static_cast<uint8_t>(midi::ProgramChange);
 			break;
 		case btmode::ctrl:
-			midiA.sendControlChange(v1, v2, chan); sent = true;
+			cmd = static_cast<uint8_t>(midi::ControlChange);
 			break;
 		case btmode::keypress:
-			midiA.sendAfterTouch(v1, v2, chan); sent = true;
+			cmd = static_cast<uint8_t>(midi::AfterTouchPoly);
 			break;
 		case btmode::chanpress:
-			midiA.sendAfterTouch(v1, chan); sent = true;
+			cmd = static_cast<uint8_t>(midi::AfterTouchChannel);
 			break;
 		case btmode::note:
-			midiA.sendNoteOn(v1, v2, chan); sent = true;
+			cmd = static_cast<uint8_t>(midi::NoteOn);
+			break;
+		case btmode::bend:
+			cmd = static_cast<uint8_t>(midi::PitchBend) ;
 			break;
 		case btmode::start:
-			midiA.sendRealTime(midi::MidiType::Start); sent = true;
+			cmd = static_cast<uint8_t>(midi::Start);
 			break;
 		case btmode::stop:
-			midiA.sendRealTime(midi::MidiType::Stop); sent = true;
+			cmd = static_cast<uint8_t>(midi::Stop);
 			break;
 	}
-	if (sent) {
+	if (cmd) {
+#ifdef ENABLE_SPI
+		spiMidiOut.addToBuf(cmd | chan, v1, v2); // send it also to the pi via the spi bus
+#endif
+		midiA.send(static_cast<midi::MidiType>(cmd), v1, v2, chan + 1); // send that to an actual midi device
 		statusLamp.setColor(Lamp8574::red, 100);
 	}
 };
 
-void sendButtonOffMidi(uint8_t typ, uint8_t chan, uint8_t v1, uint8_t v2) {
-	bool sent = false;
+void sendButtonOffMidi(uint8_t typ, uint8_t chan, uint8_t v1) {
+	uint8_t cmd = btmode::nieko;
+	uint8_t v2 = 0;
 	switch (typ) {
 		case btmode::ctrl:
-			midiA.sendControlChange(v1, 0, chan); sent = true;
+			cmd = static_cast<uint8_t>(midi::ControlChange) | chan;
+			break;
+		case btmode::bend:
+			cmd = static_cast<uint8_t>(midi::PitchBend) | chan;
+			v1 = 0x20;
 			break;
 		case btmode::note:
-			midiA.sendNoteOff(v1, v2, chan); sent = true;
+			cmd = static_cast<uint8_t>(midi::NoteOff) | chan;
 			break;
 		case btmode::start:
-			midiA.sendRealTime(midi::MidiType::Stop); sent = true;
+			cmd = midi::Stop;
 			break;
 		case btmode::stop:
-			midiA.sendRealTime(midi::MidiType::Start); sent = true;
-			break;
+			cmd = midi::Start;
+		break;
 	}
-	if (sent) {
+	if (cmd) {
+#ifdef ENABLE_SPI
+		spiMidiOut.addToBuf(cmd | chan, v1, v2); // send it also to the pi via the spi bus
+#endif
+		midiA.send(static_cast<midi::MidiType>(cmd), v1, v2, chan + 1); // send that to an actual midi device
 		statusLamp.setColor(Lamp8574::red, 100);
 	}
 }
@@ -272,7 +309,7 @@ void checkPanelButton(const uint8_t which, const bool pressed) {
 				b.state &= ~btst8::pressed;	
 				const auto btype = b.active_type & btmode::type;
 
-				sendButtonOffMidi(btype, b.channel, b.val1, b.val2);
+				sendButtonOffMidi(btype, b.channel, b.val1);
 				lamps.setLamp(which, b.state & btst8::latched? lmpBtLatchCol: lmpBtOpenCol);
 			}
 		}
@@ -280,7 +317,7 @@ void checkPanelButton(const uint8_t which, const bool pressed) {
 }
 
 void checkPedal(const uint8_t which, const uint8_t reading) {
-	uint8_t ctrlVal = reading / 2;
+	uint8_t ctrlVal = reading / 2; //! TODO: FIXME: nonono especially not for pitch bend
 	auto &ped{pedals[which]};
 	int8_t chg = ctrlVal - ped.lastVal;
 
@@ -295,9 +332,29 @@ void checkPedal(const uint8_t which, const uint8_t reading) {
 				ped.lastVal2 = ped.lastVal;
 				ped.lastVal = ctrlVal;
 				ped.lastChangeTime_ms = theTime;
-				midiA.sendControlChange(ped.ctrl, ctrlVal, ped.midiChannel);
-				if (potChangeT_ms > 200) {
-					statusLamp.setColor(Lamp8574::red, 50);
+				uint8_t cmd = btmode::nieko;
+				switch (ped.mode) {
+					case btmode::ctrl:
+						cmd = midi::ControlChange;
+						break;
+					case btmode::chanpress:
+						cmd = midi::AfterTouchChannel;
+						break;
+					case btmode::keypress:
+						cmd = midi::AfterTouchPoly;
+						break;
+					case midi::PitchBend:
+						cmd = midi::PitchBend;
+						break;
+				}
+				if (cmd) {
+#ifdef ENABLE_SPI
+					spiMidiOut.addToBuf((cmd|ped.chan), ped.ctrl, ctrlVal);
+#endif
+					midiA.send(static_cast<midi::MidiType>(cmd), ped.ctrl, ctrlVal, ped.chan); // send that to an actual midi device
+					if (potChangeT_ms > 200) {
+						statusLamp.setColor(Lamp8574::red, 50);
+					}
 				}
 			}
 		}
@@ -335,8 +392,28 @@ struct axis_ctl {
 #ifdef SERIAL_DEBUG
 			Serial.print("axus control "); Serial.print(ctrl); Serial.print(" angle "); Serial.print(angle);Serial.print(" minV "); Serial.print(minV);Serial.print(" maxV "); Serial.print(maxV);Serial.print(" factor "); Serial.print(factor);Serial.print(" cv "); Serial.println(cv);
 #endif 
-			midiA.sendControlChange(ctrl, cv, chan);
-			statusLamp.setColor(Lamp8574::blue, 50);
+			uint8_t cmd = btmode::nieko;
+			switch (mode) {
+				case btmode::ctrl:
+					cmd = midi::ControlChange;
+					break;
+				case btmode::chanpress:
+					cmd = midi::AfterTouchChannel;
+					break;
+				case btmode::keypress:
+					cmd = midi::AfterTouchPoly;
+					break;
+				case midi::PitchBend: //! TODO: FIXME: nonono 14 bits
+					cmd = midi::PitchBend;
+					break;
+			}
+			if (cmd) {
+#ifdef ENABLE_SPI
+				spiMidiOut.addToBuf((cmd|chan), ctrl, cv);
+#endif
+				midiA.send(static_cast<midi::MidiType>(cmd), ctrl, cv, chan); // send that to an actual midi device
+				statusLamp.setColor(Lamp8574::blue, 50);
+			}
 			lastCV = cv;
 		}
 	}
@@ -403,10 +480,8 @@ void checkAccelerometer(adxl345::Interface<I2c> & xlm8r, struct xl_joy &xl) {
 /*********************************************
  * SPI HANDLER
  *********************************************/
-MidiRingBuffer<32> spiMidiIn; // midi coming from the pi via SPI
-MidiRingBuffer<32> spiMidiOut; // midi going to the pi via SPI
 
-/*!
+ /*!
  * the spi interrupt routine is a pair of ad hoc state machines, with these states
  */
 enum spi_io_state_t: uint8_t {
@@ -443,6 +518,13 @@ uint8_t config_idx = 0;
 uint8_t config_data[max(sizeof(config::xlrm8r), sizeof(config::button))];
 bool rescan_requested = false;
 
+#ifdef ENABLE_SPI
+/*!
+ * service routine for SPI interupts.
+ * This could easily happen while we are adding to the spi out midi ring buffer or taking from the device out midi
+ * ring buffer.
+ * We are trying to minimize locking or avoid completely, so we are playing fast and loose for the moment
+ */
 ISR (SPI_STC_vect)
 {
 	bool was_pinged = false;
@@ -491,7 +573,7 @@ ISR (SPI_STC_vect)
 			break;
 		case midi_data_2:
 			val2_in =SPDR;
-			if (!spiMidiIn.addToBuf(cmd_in, val1_in, val2_in)) {
+			if (!deviceMidiOut.addToBuf(cmd_in, val1_in, val2_in)) {
 				dropped_midi_in = true;
 			}
 			spi_in_state = (--n_midi_cmd_incoming > 0)? midi_data: command_byte;
@@ -522,7 +604,7 @@ ISR (SPI_STC_vect)
 			if ((--config_len) <= 0) {
 				spi_in_state = command_byte;
 				if (config_id < nButtons) {
-					buttons[config_id].set(*((config::button*)config_data));
+					buttons[config_id].set(*((config::button*)config_data), true);
 				}
 			}
 			break;
@@ -576,7 +658,7 @@ ISR (SPI_STC_vect)
 
 	switch (spi_out_state) {
 		case command_byte: {
-			n_midi_cmd_outgoing = spiMidiOut.count;
+			n_midi_cmd_outgoing = spiMidiOut.itemsAvail();
 			if (n_midi_cmd_outgoing > 0) {
 				SPDR = (xyspi::midi | n_midi_cmd_outgoing);
 				spi_out_state = midi_data;
@@ -604,7 +686,7 @@ ISR (SPI_STC_vect)
 			}
 			break;
 		case filler:
-			if (spiMidiOut.count > 0) {
+			if (spiMidiOut.hasAvail() > 0) {
 				spi_out_state = command_byte;
 				SPDR = xyspi::null; // keep talking!
 			} else {
@@ -619,6 +701,7 @@ ISR (SPI_STC_vect)
 			break;
 	}
 }
+#endif
 
 /************************************************************
  * MAIN INIT
@@ -691,17 +774,27 @@ void setup() {
 	midiA.turnThruOn();
 	midiA.begin(MIDI_CHANNEL_OMNI);
 
+#ifdef ENABLE_SPI
 	/* setup SPI to with rasbpi as master */
 	pinMode(MISO, OUTPUT);
 	SPCR |= _BV(SPE);
 	SPI.attachInterrupt();
+#endif
 }
 
 /************************************************************
  * MAIN LOOP
  ************************************************************/
 void loop() {
+	// check our stat lamp. Maybe it's blink is off and it will be reset to the default color
 	statusLamp.checkBlink();
+
+	if (do_close) {
+		sendButtonOffMidi(close_mode, close_chan, close_val1);
+		do_close = false;
+	}
+
+	// process incoming midi data, sending anything useful down the spi bus to the pi
 	if (midiA.read()) {
 #ifdef SERIAL_DEBUG
 		Serial.print(midiA.getType(), HEX);Serial.print(' ');
@@ -709,6 +802,7 @@ void loop() {
 		Serial.print(midiA.getData2(), HEX);Serial.print(' ');
 		Serial.println(midiA.getChannel(), HEX);
 #endif
+#ifdef ENABLE_SPI
 		uint8_t midi_typ = midiA.getType();
 		switch (midi_typ) {
 			case midi::NoteOn:
@@ -717,11 +811,9 @@ void loop() {
 			case midi::ProgramChange:
 			case midi::AfterTouchChannel:
 			case midi::AfterTouchPoly:
+			case midi::PitchBend:
 				spiMidiOut.addToBuf(midi_typ|(midiA.getChannel()-1), midiA.getData1(), midiA.getData2());
 				statusLamp.setColor(Lamp8574::blue, 50);
-				break;
-
-			case midi::PitchBend:
 				break;
 
 			case midi::Clock:
@@ -734,38 +826,9 @@ void loop() {
 				statusLamp.setColor(Lamp8574::blue, 50);
 				break;
 		}
+#endif
 	} else {
 //		Serial.println("nope");
-	}
-	while (spiMidiIn.count > 0) {
-		uint8_t cmd, chan, val1, val2;
-		spiMidiIn.getFromBuf(cmd, val1, val2);
-		chan = (cmd & 0xf) + 1;
-		cmd &= 0xf0;
-		switch (cmd) {
-			case midi::NoteOn:
-			case midi::NoteOff:
-			case midi::ControlChange:
-			case midi::ProgramChange:
-			case midi::AfterTouchChannel:
-			case midi::AfterTouchPoly:
-				midiA.send(static_cast<midi::MidiType>(cmd), val1, val2, chan);
-				statusLamp.setColor(Lamp8574::red, 50);
-				break;
-
-			case midi::PitchBend:
-				break;
-				
-			case midi::Clock:
-				break;
-
-			case midi::Start:
-			case midi::Stop:
-			case midi::Continue:
-				midiA.sendRealTime(static_cast<midi::MidiType>(cmd));
-				statusLamp.setColor(Lamp8574::red, 50);
-				break;
-		}
 	}
 
 	const uint8_t currentButtons = buttonStates.getInputs();
@@ -790,4 +853,34 @@ void loop() {
 //	print_hex_byte(currentAdcEnables);
 	checkAccelerometer(accelerometer, xlmr8rs[0]);
 
+	// Now send everything that has come from the spi bus to an actual midi device
+	// This includes all the button presses, accelerometers and pedals
+	while (deviceMidiOut.hasAvail() > 0) {
+		uint8_t cmd, chan, val1, val2;
+		deviceMidiOut.getFromBuf(cmd, val1, val2);
+		chan = (cmd & 0xf) + 1;
+		cmd &= 0xf0;
+		switch (cmd) {
+			case midi::NoteOn:
+			case midi::NoteOff:
+			case midi::ControlChange:
+			case midi::ProgramChange:
+			case midi::AfterTouchChannel:
+			case midi::AfterTouchPoly:
+			case midi::PitchBend:
+				midiA.send(static_cast<midi::MidiType>(cmd), val1, val2, chan);
+				statusLamp.setColor(Lamp8574::red, 50);
+				break;
+
+			case midi::Clock:
+				break;
+
+			case midi::Start:
+			case midi::Stop:
+			case midi::Continue:
+				midiA.sendRealTime(static_cast<midi::MidiType>(cmd));
+				statusLamp.setColor(Lamp8574::red, 50);
+				break;
+		}
+	}
 }

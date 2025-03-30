@@ -35,9 +35,10 @@ namespace config {
 		chanpress = 3,
 		keypress = 4,
 		note = 5,
-		start = 6,
-		stop = 7,
-		type = 0x07,
+		bend = 6,
+		start = 7,
+		stop = 8,
+		type = 0x0f,
 		latch = 0x10,
 	};
 
