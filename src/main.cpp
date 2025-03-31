@@ -159,27 +159,41 @@ using btst8 = button::state_t;
 
 /*!
  * mappings for pedals
+ * the minval and maxval are [0, 127] for pedals and bends, just to simplify the config. bends will be scaled up
+ * and spread across two bytes
  */
 struct pedal {
-	pedal(config::pedal cfg)
-	: lastChangeTime_ms(0), mode(cfg.mode), ctrl(cfg.which), chan(cfg.chan), lastVal(255), lastVal2(255) {}
+	pedal(config::pedal cfg) {
+		set(cfg);
+	}
 
 	void set(config::pedal &cfg) {
 		lastChangeTime_ms = 0;
-		lastVal = 255;
-		lastVal2 = 255;
+		lastCV = 255;
+		lastCV2 = 255;
 		ctrl = cfg.which;
 		mode = cfg.mode;
 		chan = cfg.chan;
+		minVal = cfg.min_val;
+		maxVal = cfg.max_val;
+		factor = (maxVal - minVal + 1);
+		if (mode == btmode::bend) {
+			factor /= 2.0;
+		} else {
+			factor /= 256.0;
+		}
 	}
 
 	long lastChangeTime_ms;
+	float factor = 0.5;
 	uint8_t mode;
 	uint8_t ctrl;
 	uint8_t chan;
+	uint8_t minVal;
+	uint8_t maxVal;
 
-	uint8_t lastVal;
-	uint8_t lastVal2;
+	uint8_t lastCV;
+	uint8_t lastCV2;
 };
 
 struct pedal pedals[] = {
@@ -316,45 +330,52 @@ void checkPanelButton(const uint8_t which, const bool pressed) {
 	}
 }
 
-void checkPedal(const uint8_t which, const uint8_t reading) {
-	uint8_t ctrlVal = reading / 2; //! TODO: FIXME: nonono especially not for pitch bend
+/*!
+ * we might need some low pass filtering here.
+ * 'cv' is the raw voltage reading in the range [0, 255]
+ */
+void checkPedal(const uint8_t which, const uint8_t cv) {
 	auto &ped{pedals[which]};
-	int8_t chg = ctrlVal - ped.lastVal;
+	int8_t chg = cv - ped.lastCV;
 
 	if (chg != 0) {
 		long theTime = millis();
-		int8_t chg2 = ctrlVal - ped.lastVal2;
 		long potChangeT_ms = theTime - ped.lastChangeTime_ms;
 		if (potChangeT_ms > pedalChangeMinTime_ms) {
-			if (ped.lastVal2 == 255
-							|| (ctrlVal <= 64 && (chg < 0 || chg2 > 3))
-							|| (ctrlVal > 64 && (chg > 0 || chg2 < -3))) {
-				ped.lastVal2 = ped.lastVal;
-				ped.lastVal = ctrlVal;
-				ped.lastChangeTime_ms = theTime;
-				uint8_t cmd = btmode::nieko;
-				switch (ped.mode) {
-					case btmode::ctrl:
-						cmd = midi::ControlChange;
-						break;
-					case btmode::chanpress:
-						cmd = midi::AfterTouchChannel;
-						break;
-					case btmode::keypress:
-						cmd = midi::AfterTouchPoly;
-						break;
-					case midi::PitchBend:
-						cmd = midi::PitchBend;
-						break;
-				}
-				if (cmd) {
+			ped.lastCV2 = ped.lastCV;
+			ped.lastChangeTime_ms = theTime;
+			uint8_t cmd = btmode::nieko;
+			uint8_t ctrlVal2;
+			uint8_t ctrlVal1 = ped.ctrl;
+			if (ped.mode != btmode::bend) {
+				ctrlVal2 = static_cast<uint8_t>(cv * ped.factor); // factor <= 0.5
+			} else {
+				uint16_t full_bend = cv * ped.factor; // bend has a large factor
+				ctrlVal2 = static_cast<uint8_t>(full_bend & 0x7f);
+				ctrlVal1 = static_cast<uint8_t>((full_bend >> 7) & 0x7f);
+			}
+			switch (ped.mode) {
+				case btmode::ctrl:
+					cmd = midi::ControlChange;
+					break;
+				case btmode::chanpress:
+					cmd = midi::AfterTouchChannel;
+					break;
+				case btmode::keypress:
+					cmd = midi::AfterTouchPoly;
+					break;
+				case midi::PitchBend:
+					// range is 0–16383, with center value 8192
+					cmd = midi::PitchBend;
+					break;
+			}
+			if (cmd) {
 #ifdef ENABLE_SPI
-					spiMidiOut.addToBuf((cmd|ped.chan), ped.ctrl, ctrlVal);
+				spiMidiOut.addToBuf((cmd|ped.chan), ctrlVal1, ctrlVal2);
 #endif
-					midiA.send(static_cast<midi::MidiType>(cmd), ped.ctrl, ctrlVal, ped.chan); // send that to an actual midi device
-					if (potChangeT_ms > 200) {
-						statusLamp.setColor(Lamp8574::red, 50);
-					}
+				midiA.send(static_cast<midi::MidiType>(cmd), ctrlVal1, ctrlVal2, ped.chan); // send that to an actual midi device
+				if (potChangeT_ms > 200) {
+					statusLamp.setColor(Lamp8574::red, 50);
 				}
 			}
 		}
@@ -382,17 +403,20 @@ struct axis_ctl {
 		ctrlMax = _ctrlMax;
 		lastCV = 255;
 		factor = (ctrlMax != ctrlMin)? float(ctrlMax - ctrlMin)/float(maxV - minV) : 0;
+		if (mode == btmode::bend) factor *= 128;
 	}
 
-	void checkSend(int angle) {
+	void checkSend(float angle) {
 		if (angle < minV) angle = minV;
 		else if (angle > maxV) angle = maxV;
-		uint8_t cv = ctrlMin + (angle - minV) * factor;
-	 if (cv != lastCV) {
+		uint16_t cv = ctrlMin + (angle - minV) * factor;
+		if (cv != lastCV) {
 #ifdef SERIAL_DEBUG
 			Serial.print("axus control "); Serial.print(ctrl); Serial.print(" angle "); Serial.print(angle);Serial.print(" minV "); Serial.print(minV);Serial.print(" maxV "); Serial.print(maxV);Serial.print(" factor "); Serial.print(factor);Serial.print(" cv "); Serial.println(cv);
 #endif 
 			uint8_t cmd = btmode::nieko;
+			uint8_t val1 = ctrl;
+			uint8_t val2 = cv & 0x7f;
 			switch (mode) {
 				case btmode::ctrl:
 					cmd = midi::ControlChange;
@@ -403,30 +427,32 @@ struct axis_ctl {
 				case btmode::keypress:
 					cmd = midi::AfterTouchPoly;
 					break;
-				case midi::PitchBend: //! TODO: FIXME: nonono 14 bits
+				case midi::PitchBend:
+					val1 = ((cv >> 7) & 0x7f);
 					cmd = midi::PitchBend;
 					break;
 			}
 			if (cmd) {
 #ifdef ENABLE_SPI
-				spiMidiOut.addToBuf((cmd|chan), ctrl, cv);
+				spiMidiOut.addToBuf((cmd|chan), val1, val2);
 #endif
-				midiA.send(static_cast<midi::MidiType>(cmd), ctrl, cv, chan); // send that to an actual midi device
+				midiA.send(static_cast<midi::MidiType>(cmd), val1, val2, chan); // send that to an actual midi device
 				statusLamp.setColor(Lamp8574::blue, 50);
 			}
 			lastCV = cv;
 		}
 	}
 	
+	float factor;
+	uint16_t lastCV;
 	uint8_t mode;
 	uint8_t chan;
 	uint8_t ctrl;
-	int minV; // assuming we range -180..180, and probably a smaller ambit than even 180
-	int maxV; // > min
+	int8_t minV;	// assuming we range -127..127, and probably a smaller ambit than even 180. that's all the config supports
+					// and sanity dictates. easy enough to revise this. for current usage [-45,45] is fine
+	int8_t maxV;	// and even [-90, 90] is pretty acrobatic
 	uint8_t ctrlMin; // ctrl value at min 0..127
 	uint8_t ctrlMax; // ctrl value at max . may be > or < than CtrlMin
-	float factor;
-	uint8_t lastCV;
  
 };
 
@@ -463,8 +489,8 @@ void checkAccelerometer(adxl345::Interface<I2c> & xlm8r, struct xl_joy &xl) {
 			adxl345::Vector v(x,y,z);
 /* filtered = filtered.lowPassFilter(v, 0.5); // Low Pass Filter to smooth out data. 0.1 - 0.9 */
 // convert to degrees: these are probably going to be simpler to work with if we need to configure on the fly through front panel
-			int pitch = -atan2(v.x, sqrt(v.y*v.y + v.z*v.z))*kRadGrad;
-			int roll	= atan2(v.y, v.z)*kRadGrad;
+			float pitch = -atan2(v.x, sqrt(v.y*v.y + v.z*v.z))*kRadGrad;
+			float roll	= atan2(v.y, v.z)*kRadGrad;
 #if defined(SERIAL_DEBUG) && SERIAL_DEBUG_LEVEL > 2
 			Serial.print("xyz ->");Serial.print(x); Serial.print(' '); Serial.print(y); Serial.print(' '); Serial.print(z);
 					Serial.print(" :: "); Serial.print(pitch); Serial.print(' '); Serial.println(roll);
