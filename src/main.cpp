@@ -15,31 +15,66 @@
 #define SERIAL_DEBUG
 #define SERIAL_DEBUG_LEVEL 1
 #define ENABLE_SPI
+#define DIAG_MESSAGE
 
 midi::MidiInterface<HardwareSerial> midiA((HardwareSerial&)Serial1);
 
 using color=RGBLempos::color;
 
-constexpr uint8_t kButtonStateAdr = 0x38;
-constexpr uint8_t kAdcEnableAdr = 0x39;
-constexpr uint8_t kAdcAdr = 0x48;
+constexpr uint8_t buttonStateI2CAdr = 0x38;
+constexpr uint8_t adcEnableI2CAdr = 0x39;
+constexpr uint8_t adcI2CAdr = 0x48;
 
 constexpr uint16_t xlm8rReadDelay_ms = 100;
 constexpr uint8_t debounceDelay_ms = 10;
 constexpr uint16_t longPressTime_ms = 500;
 
 constexpr uint8_t pedalChangeMinTime_ms = 50;
-
+constexpr uint8_t nCachedClockTicks = 24;
 
 RGBLempos lamps(19, 21, 20);
-PCF8574<I2c> buttonStates(kButtonStateAdr);
-PCF8574<I2c> adcEnable(kAdcEnableAdr);
-PCF8591<I2c> adc(kAdcAdr);
+PCF8574<I2c> buttonStates(buttonStateI2CAdr);
+PCF8574<I2c> adcEnable(adcEnableI2CAdr);
+PCF8591<I2c> adc(adcI2CAdr);
 adxl345::Interface<I2c> accelerometer(adxl345::kAddress1);
 
 MidiRingBuffer<32> deviceMidiOut; // midi going to the duino midi out, coming from the pi via SPI, buttons, pedal, and stuff
 #ifdef ENABLE_SPI
 MidiRingBuffer<32> spiMidiOut; // midi going to the pi via SPI, includes the pedals, buttons and accelerometers
+#endif
+
+float globalTempo = 120;
+float beatLength_s = 0.5;
+int16_t clockDurCache[nCachedClockTicks]; // keep track of past ticks so we can make a running average
+uint8_t clockCacheHead = -1;
+uint8_t clockCacheTail = -1;
+int16_t tickDurationRunningTotal = 0;
+unsigned long lastTickMillis = 0;
+unsigned long nextTickMillis = 0;
+int16_t runningDurTotal = 0;
+bool isMidiMasterClock = false;
+volatile bool cancelMidiMasterClock = false;
+volatile bool startMidiMasterClock = false;
+
+#ifdef DIAG_MESSAGE
+volatile bool hasDiagMessage = false;
+volatile uint8_t diagMessageLength = 0;
+volatile uint8_t diagMessageIdx = 0;
+constexpr uint8_t maxDiagMessageLength = 32;
+uint8_t diagMessage[maxDiagMessageLength];
+
+/*!
+ * build diagnostic messages to send up spi to the pi
+ */
+void addToMsg(const char *p) {
+	hasDiagMessage = true;
+	while (diagMessageLength < maxDiagMessageLength) {
+		diagMessage[diagMessageLength++] = *p;
+		if (*p++ == '\0') {
+			break;
+		}
+	}
+}
 #endif
 
 /*!
@@ -81,10 +116,10 @@ protected:
 
 Lamp8574 statusLamp(adcEnable, 4);
 
-using btmode = config::mode_t;
+using mod = config::mode_t;
 
 bool do_close = false;
-bool close_mode = btmode::nieko;
+bool close_mode = mod::nieko;
 bool close_chan = 0;
 bool close_val1 = 0;
 
@@ -127,6 +162,13 @@ struct button {
 		lastPressState = false;		
 	}
 
+	/*!
+	 * in any kind of pressed or latched state 
+	 */
+	bool active() {
+		return state | (state_t::latched | state_t::latching | state_t::pressed | state_t::longPressed); 	
+	}
+
 	long lastBounceTime_ms;
 	long pressedTime_ms;
 	uint8_t mode;
@@ -142,17 +184,17 @@ struct button {
 	bool lastPressState;
 };
 
-#define LATCH(X) ((config::mode_t)(X|btmode::latch))
+#define LATCH(X) ((config::mode_t)(X|mod::latch))
 
 struct button buttons[] = {
-	{{ 0, btmode::ctrl, 32, 127,		btmode::latch, 0, 0}},
-	{{ 0, btmode::note, 33, 80,			btmode::latch, 0, 0}},
-	{{ 0, LATCH(btmode::ctrl), 34, 80,	btmode::ctrl, 34, 120}},
-	{{ 0, btmode::prog, 35, 33,			btmode::latch, 0, 0}},
-	{{ 0, btmode::ctrl, 36, 120,		btmode::latch, 0, 0}},
-	{{ 0, btmode::note, 37, 80,			LATCH(btmode::keypress), 37, 100}},
-	{{ 0, btmode::start, 38, 120,		btmode::latch, 0, 0}},
-	{{ 0, btmode::nieko, 39, 120,		btmode::latch, 0, 0}},
+	{{ 0, mod::ctrl, 32, 127,		mod::latch, 0, 0}},
+	{{ 0, mod::note, 33, 80,			mod::latch, 0, 0}},
+	{{ 0, LATCH(mod::ctrl), 34, 80,	mod::ctrl, 34, 120}},
+	{{ 0, mod::prog, 35, 33,			mod::latch, 0, 0}},
+	{{ 0, mod::ctrl, 36, 120,		mod::latch, 0, 0}},
+	{{ 0, mod::note, 37, 80,			LATCH(mod::keypress), 37, 100}},
+	{{ 0, mod::start, 38, 120,		mod::latch, 0, 0}},
+	{{ 0, mod::nieko, 39, 120,		mod::latch, 0, 0}},
 };
 constexpr uint8_t nButtons = sizeof(buttons)/sizeof(button);
 using btst8 = button::state_t;
@@ -177,29 +219,49 @@ struct pedal {
 		minVal = cfg.min_val;
 		maxVal = cfg.max_val;
 		factor = (maxVal - minVal + 1);
-		if (mode == btmode::bend) {
-			factor /= 2.0;
-		} else {
-			factor /= 256.0;
+		factor /= (mode == mod::bend? 2.0 : 256.0);
+		alt_mode = cfg.alt_mode;
+		alt_chan = cfg.alt_chan;
+		alt_minVal = cfg.alt_min_val;
+		alt_maxVal = cfg.alt_max_val;
+		auto p = alt_ctrl;
+		for (const auto i: cfg.alt_which) {
+			*p++ = i;
 		}
+		alt_factor = (alt_maxVal - alt_minVal + 1);
+		alt_factor /= (alt_mode == mod::bend? 2.0 : 256.0);
+
 	}
 
 	long lastChangeTime_ms;
 	float factor = 0.5;
+	float alt_factor = 0.5;
+
+	uint8_t shift_btn;
+
 	uint8_t mode;
 	uint8_t ctrl;
 	uint8_t chan;
 	uint8_t minVal;
 	uint8_t maxVal;
 
+	uint8_t alt_mode;
+	uint8_t alt_chan;
+	uint8_t alt_minVal;
+	uint8_t alt_maxVal;
+	uint8_t alt_ctrl[config::nButtons];
+
 	uint8_t lastCV;
 	uint8_t lastCV2;
 };
 
 struct pedal pedals[] = {
-	{{ 0, btmode::ctrl, 85, 0, 127 }},
-	{{ 0, btmode::ctrl, 86, 0, 127 }},
-	{{ 0, btmode::ctrl, 87, 0, 127 }}
+	{{ 0, mod::ctrl, 0, 127, 85,	0, 1, mod::ctrl, 0, 127,
+									{12, 0, 0, 0, 0, 0, 0, 0} }},
+	{{ 0, mod::ctrl, 0, 127, 86, 	mod::all_btn,	mod::btn_chn, mod::ctrl, 0, 127,
+									{86, 86, 86, 86, 86, 86, 86, 86} }},
+	{{ 0, mod::keypress, 0, 127, 0, mod::all_btn,	mod::btn_chn, mod::bend, 0, 127,
+									{mod::nc, 0, mod::nc, mod::nc, mod::nc, 0, mod::nc, mod::nc} }}
 };
 constexpr uint8_t nPedals = sizeof(pedals)/sizeof(pedal);
 
@@ -211,30 +273,30 @@ constexpr uint8_t lmpBtLatchCol = color::blue;
  */
 
  void sendButtonOnMidi(uint8_t typ, uint8_t chan, uint8_t v1, uint8_t v2) {
-	uint8_t cmd = btmode::nieko;
+	uint8_t cmd = mod::nieko;
 	switch (typ) {
-		case btmode::prog:
+		case mod::prog:
 			cmd = static_cast<uint8_t>(midi::ProgramChange);
 			break;
-		case btmode::ctrl:
+		case mod::ctrl:
 			cmd = static_cast<uint8_t>(midi::ControlChange);
 			break;
-		case btmode::keypress:
+		case mod::keypress:
 			cmd = static_cast<uint8_t>(midi::AfterTouchPoly);
 			break;
-		case btmode::chanpress:
+		case mod::chanpress:
 			cmd = static_cast<uint8_t>(midi::AfterTouchChannel);
 			break;
-		case btmode::note:
+		case mod::note:
 			cmd = static_cast<uint8_t>(midi::NoteOn);
 			break;
-		case btmode::bend:
+		case mod::bend:
 			cmd = static_cast<uint8_t>(midi::PitchBend) ;
 			break;
-		case btmode::start:
+		case mod::start:
 			cmd = static_cast<uint8_t>(midi::Start);
 			break;
-		case btmode::stop:
+		case mod::stop:
 			cmd = static_cast<uint8_t>(midi::Stop);
 			break;
 	}
@@ -248,23 +310,23 @@ constexpr uint8_t lmpBtLatchCol = color::blue;
 };
 
 void sendButtonOffMidi(uint8_t typ, uint8_t chan, uint8_t v1) {
-	uint8_t cmd = btmode::nieko;
+	uint8_t cmd = mod::nieko;
 	uint8_t v2 = 0;
 	switch (typ) {
-		case btmode::ctrl:
+		case mod::ctrl:
 			cmd = static_cast<uint8_t>(midi::ControlChange) | chan;
 			break;
-		case btmode::bend:
+		case mod::bend:
 			cmd = static_cast<uint8_t>(midi::PitchBend) | chan;
 			v1 = 0x20;
 			break;
-		case btmode::note:
+		case mod::note:
 			cmd = static_cast<uint8_t>(midi::NoteOff) | chan;
 			break;
-		case btmode::start:
+		case mod::start:
 			cmd = midi::Stop;
 			break;
-		case btmode::stop:
+		case mod::stop:
 			cmd = midi::Start;
 		break;
 	}
@@ -292,18 +354,18 @@ void checkPanelButton(const uint8_t which, const bool pressed) {
 			if (!(b.state & btst8::pressed)) {
 				b.state |= btst8::pressed;
 				b.pressedTime_ms = theTime;
-				const auto btype = b.mode & btmode::type;
+				const auto btype = b.mode & mod::type;
 				b.active_type = btype;
 
-				if (b.mode & btmode::latch){
+				if (b.mode & mod::latch){
 					b.state |= (btst8::latched|btst8::latching);
 				}
 				sendButtonOnMidi(btype, b.channel, b.val1, b.val2);
 				lamps.setLamp(which, (b.state & btst8::latched)? lmpBtLatchCol: lmpBtDownCol);
 			} else if (!(b.state & btst8::longPressed) && b.pressedTime_ms + longPressTime_ms < theTime) {
 				b.state |= btst8::longPressed;
-				const auto btype = b.long_mode & btmode::type;
-				if (b.long_mode & btmode::latch){
+				const auto btype = b.long_mode & mod::type;
+				if (b.long_mode & mod::latch){
 					b.state |= (btst8::latched|btst8::latching);
 				}
 				if (btype > b.active_type) {
@@ -321,13 +383,37 @@ void checkPanelButton(const uint8_t which, const bool pressed) {
 					b.state &= ~btst8::latched;
 				}
 				b.state &= ~btst8::pressed;	
-				const auto btype = b.active_type & btmode::type;
+				const auto btype = b.active_type & mod::type;
 
 				sendButtonOffMidi(btype, b.channel, b.val1);
 				lamps.setLamp(which, b.state & btst8::latched? lmpBtLatchCol: lmpBtOpenCol);
 			}
 		}
 	}
+}
+
+/*!
+ *
+ */
+uint8_t checkShiftButton(uint8_t shift_btn, uint8_t alt_chan, uint8_t &chan, uint8_t alt_ctrl[], uint8_t &ctrlVal1){
+	if (shift_btn == mod::no_shft) {
+		return mod::no_shft;
+	}
+	if (shift_btn != mod::all_btn) {
+		if (shift_btn < nButtons && buttons[shift_btn].active()) {
+			ctrlVal1 = alt_ctrl[0];
+			chan = alt_chan;
+			return shift_btn;
+		}
+	}
+	for (uint8_t i=0; i<nButtons; i++) {
+		if (alt_ctrl[i] != mod::nc && buttons[i].active()) {
+			ctrlVal1 = alt_ctrl[i];
+			chan = (alt_chan == mod::btn_chn? alt_chan: buttons[i].channel);
+			return i;
+		}
+	}
+	return mod::no_shft;
 }
 
 /*!
@@ -339,29 +425,39 @@ void checkPedal(const uint8_t which, const uint8_t cv) {
 	int8_t chg = cv - ped.lastCV;
 
 	if (chg != 0) {
-		long theTime = millis();
-		long potChangeT_ms = theTime - ped.lastChangeTime_ms;
+		auto theTime = millis();
+		auto potChangeT_ms = theTime - ped.lastChangeTime_ms;
 		if (potChangeT_ms > pedalChangeMinTime_ms) {
 			ped.lastCV2 = ped.lastCV;
 			ped.lastChangeTime_ms = theTime;
-			uint8_t cmd = btmode::nieko;
+
+			uint8_t cmd = mod::nieko;
+			uint8_t mode = ped.mode;
 			uint8_t ctrlVal2;
 			uint8_t ctrlVal1 = ped.ctrl;
-			if (ped.mode != btmode::bend) {
-				ctrlVal2 = static_cast<uint8_t>(cv * ped.factor); // factor <= 0.5
+			uint8_t chan = ped.chan;
+			float factor = ped.factor;
+			
+			if (checkShiftButton(ped.shift_btn, ped.alt_chan, chan, ped.alt_ctrl, ctrlVal1) != mod::no_shft) {
+				mode = ped.alt_mode;
+				factor = ped.alt_factor;
+			}
+			
+			if (mode != mod::bend) {
+				ctrlVal2 = static_cast<uint8_t>(cv * factor); // factor <= 0.5
 			} else {
-				uint16_t full_bend = cv * ped.factor; // bend has a large factor
+				uint16_t full_bend = cv * factor; // bend has a large factor
 				ctrlVal2 = static_cast<uint8_t>(full_bend & 0x7f);
 				ctrlVal1 = static_cast<uint8_t>((full_bend >> 7) & 0x7f);
 			}
-			switch (ped.mode) {
-				case btmode::ctrl:
+			switch (mode) {
+				case mod::ctrl:
 					cmd = midi::ControlChange;
 					break;
-				case btmode::chanpress:
+				case mod::chanpress:
 					cmd = midi::AfterTouchChannel;
 					break;
-				case btmode::keypress:
+				case mod::keypress:
 					cmd = midi::AfterTouchPoly;
 					break;
 				case midi::PitchBend:
@@ -371,9 +467,9 @@ void checkPedal(const uint8_t which, const uint8_t cv) {
 			}
 			if (cmd) {
 #ifdef ENABLE_SPI
-				spiMidiOut.addToBuf((cmd|ped.chan), ctrlVal1, ctrlVal2);
+				spiMidiOut.addToBuf((cmd|chan), ctrlVal1, ctrlVal2);
 #endif
-				midiA.send(static_cast<midi::MidiType>(cmd), ctrlVal1, ctrlVal2, ped.chan); // send that to an actual midi device
+				midiA.send(static_cast<midi::MidiType>(cmd), ctrlVal1, ctrlVal2, chan); // send that to an actual midi device
 				if (potChangeT_ms > 200) {
 					statusLamp.setColor(Lamp8574::red, 50);
 				}
@@ -389,42 +485,49 @@ constexpr float kRadGrad = (180.0/M_PI);
 constexpr float kRad = (1.0/M_PI);
 
 struct axis_ctl {
-	axis_ctl(uint8_t _mode, uint8_t _chan, uint8_t _ctrl, int _min, int _max, uint8_t _ctrlMin, uint8_t _ctrlMax) {
+	axis_ctl(uint8_t _mode, uint8_t _chan, uint8_t _ctrl[], int _min, int _max, uint8_t _ctrlMin, uint8_t _ctrlMax) {
 		set(_mode, _chan, _ctrl, _min, _max, _ctrlMin, _ctrlMax);
 	}
 
-	void set(uint8_t _mode, uint8_t _chan, uint8_t _ctrl, int _min, int _max, uint8_t _ctrlMin, uint8_t _ctrlMax) {
+	void set(uint8_t _mode, uint8_t _chan, uint8_t _ctrl[], int _min, int _max, uint8_t _ctrlMin, uint8_t _ctrlMax) {
 		mode = _mode;
 		chan = _chan;
-		ctrl = _ctrl;
+		for (uint8_t i=0; i<nButtons; i++) {
+			ctrl[i] = _ctrl[i];
+		}
 		minV = _min;
 		maxV = _max;
 		ctrlMin = _ctrlMin;
 		ctrlMax = _ctrlMax;
 		lastCV = 255;
 		factor = (ctrlMax != ctrlMin)? float(ctrlMax - ctrlMin)/float(maxV - minV) : 0;
-		if (mode == btmode::bend) factor *= 128;
+		if (mode == mod::bend) factor *= 128;
 	}
 
-	void checkSend(float angle) {
+	void checkSend(uint8_t en_but, float angle) {
 		if (angle < minV) angle = minV;
 		else if (angle > maxV) angle = maxV;
 		uint16_t cv = ctrlMin + (angle - minV) * factor;
+		uint8_t val1 = ctrl[0];
+		uint8_t midi_chan = chan;
+		if (checkShiftButton(en_but, midi_chan, midi_chan, ctrl, val1) == mod::no_shft) {
+			return;
+		}
+
 		if (cv != lastCV) {
 #ifdef SERIAL_DEBUG
-			Serial.print("axus control "); Serial.print(ctrl); Serial.print(" angle "); Serial.print(angle);Serial.print(" minV "); Serial.print(minV);Serial.print(" maxV "); Serial.print(maxV);Serial.print(" factor "); Serial.print(factor);Serial.print(" cv "); Serial.println(cv);
+			Serial.print("axus control "); Serial.print(val1); Serial.print(" angle "); Serial.print(angle);Serial.print(" minV "); Serial.print(minV);Serial.print(" maxV "); Serial.print(maxV);Serial.print(" factor "); Serial.print(factor);Serial.print(" cv "); Serial.println(cv);
 #endif 
-			uint8_t cmd = btmode::nieko;
-			uint8_t val1 = ctrl;
+			uint8_t cmd = mod::nieko;
 			uint8_t val2 = cv & 0x7f;
 			switch (mode) {
-				case btmode::ctrl:
+				case mod::ctrl:
 					cmd = midi::ControlChange;
 					break;
-				case btmode::chanpress:
+				case mod::chanpress:
 					cmd = midi::AfterTouchChannel;
 					break;
-				case btmode::keypress:
+				case mod::keypress:
 					cmd = midi::AfterTouchPoly;
 					break;
 				case midi::PitchBend:
@@ -434,9 +537,9 @@ struct axis_ctl {
 			}
 			if (cmd) {
 #ifdef ENABLE_SPI
-				spiMidiOut.addToBuf((cmd|chan), val1, val2);
+				spiMidiOut.addToBuf((cmd|midi_chan), val1, val2);
 #endif
-				midiA.send(static_cast<midi::MidiType>(cmd), val1, val2, chan); // send that to an actual midi device
+				midiA.send(static_cast<midi::MidiType>(cmd), val1, val2, midi_chan); // send that to an actual midi device
 				statusLamp.setColor(Lamp8574::blue, 50);
 			}
 			lastCV = cv;
@@ -447,7 +550,7 @@ struct axis_ctl {
 	uint16_t lastCV;
 	uint8_t mode;
 	uint8_t chan;
-	uint8_t ctrl;
+	uint8_t ctrl[nButtons];
 	int8_t minV;	// assuming we range -127..127, and probably a smaller ambit than even 180. that's all the config supports
 					// and sanity dictates. easy enough to revise this. for current usage [-45,45] is fine
 	int8_t maxV;	// and even [-90, 90] is pretty acrobatic
@@ -476,12 +579,28 @@ struct xl_joy {
 };
 
 struct xl_joy xlmr8rs[] = {
-	{{0, 2, /* pitch */	btmode::ctrl, 83, -45, 45, 0, 127, /* roll */ btmode::ctrl, 84, -45, 45, 0, 127}}
+	{{adxl345::kAddress1,	0, 2,
+			/* pitch */	mod::ctrl, -45, 45, 0, 127, {51, mod::nc, mod::nc, mod::nc, mod::nc, mod::nc, mod::nc, mod::nc},
+			/* roll */	mod::ctrl, -45, 45, 0, 127, {50, mod::nc, mod::nc, mod::nc, mod::nc, mod::nc, mod::nc, mod::nc}}}
 };
 constexpr uint8_t nXlmr8rs = sizeof(xlmr8rs)/sizeof(xl_joy);
 
+
+bool checkXlButton(const xl_joy &xl)
+{
+	if (xl.activeButton == mod::no_shft) return true;
+	if (xl.activeButton != mod::all_btn && buttons[xl.activeButton].active()) return true;
+	for (uint8_t i=0; i<nButtons; ++i) {
+		if (buttons[i].active() && ((xl.pitch.ctrl[i] & xl.roll.ctrl[i]) != mod::nc)) { // nc == 0xff -> simplify this check
+			return true;
+		}
+	}
+	return false;
+}
+
+
 void checkAccelerometer(adxl345::Interface<I2c> & xlm8r, struct xl_joy &xl) {
-	if (xlm8r.isValid && (xl.activeButton == 255 || buttons[xl.activeButton].pressed)) {
+	if (xlm8r.isValid && checkXlButton(xl)) {
 		long theTime = millis();
 		if (theTime - xl.lastReading_ms > xlm8rReadDelay_ms) {
 			int16_t x, y, z;
@@ -495,8 +614,8 @@ void checkAccelerometer(adxl345::Interface<I2c> & xlm8r, struct xl_joy &xl) {
 			Serial.print("xyz ->");Serial.print(x); Serial.print(' '); Serial.print(y); Serial.print(' '); Serial.print(z);
 					Serial.print(" :: "); Serial.print(pitch); Serial.print(' '); Serial.println(roll);
 #endif
-			xl.pitch.checkSend(pitch);
-			xl.roll.checkSend(roll);
+			xl.pitch.checkSend(xl.activeButton, pitch);
+			xl.roll.checkSend(xl.activeButton, roll);
 			xl.lastReading_ms = theTime;
 		}
 	}
@@ -529,7 +648,9 @@ enum spi_io_state_t: uint8_t {
 	config_xlr_len = 15,
 	config_xlr_dta = 16,
 	config_skip = 17,
-	filler = 18
+	diag_message_length = 18,
+	diag_message_data = 19,
+	filler = 20,
 };
 
 spi_io_state_t spi_in_state = command_byte;
@@ -541,8 +662,13 @@ uint8_t cmd_out = 0, val1_out = 0, val2_out = 0;
 uint8_t config_id = 0;
 uint8_t config_len = 0;
 uint8_t config_idx = 0;
-uint8_t config_data[max(sizeof(config::xlrm8r), sizeof(config::button))];
-bool rescan_requested = false;
+uint8_t config_data[max(sizeof(config::pedal), max(sizeof(config::xlrm8r), sizeof(config::button)))];
+
+volatile float incoming_tempo = 0;
+volatile float outgoing_tempo = 0;
+volatile bool set_tempo = false;
+volatile bool rescan_requested = false;
+volatile bool tempo_requested = false;
 
 #ifdef ENABLE_SPI
 /*!
@@ -573,8 +699,12 @@ ISR (SPI_STC_vect)
 					case xyspi::rescan:
 						rescan_requested = true;
 						break;
+					case xyspi::send_tempo:
+						tempo_requested = true;
+						break;
 					case xyspi::tempo:
 						spi_in_state = tempo_data;
+						set_tempo = false;
 						break;
 					case xyspi::cfg_button:
 						spi_in_state = config_btn_id;
@@ -584,6 +714,16 @@ ISR (SPI_STC_vect)
 						break;
 					case xyspi::cfg_xlrm8:
 						spi_in_state = config_xlr_id;
+						break;
+					case xyspi::set_masterclk:
+						startMidiMasterClock = true;
+						break;
+					case xyspi::set_masterclk_off:
+						isMidiMasterClock = false;
+						break;
+					case xyspi::set_midithru:
+						break;
+					case xyspi::set_midithru_off:
 						break;
 				}
 			}
@@ -606,15 +746,20 @@ ISR (SPI_STC_vect)
 			break;
 		case tempo_data:
 			spi_in_state = tempo_data_1;
+			((uint8_t*)&incoming_tempo)[0] = SPDR;
 			break;
 		case tempo_data_1:
 			spi_in_state = tempo_data_2;
+			((uint8_t*)&incoming_tempo)[1] = SPDR;
 			break;
 		case tempo_data_2:
 			spi_in_state = tempo_data_3;
+			((uint8_t*)&incoming_tempo)[2] = SPDR;
 			break;
 		case tempo_data_3:
 			spi_in_state = command_byte;
+			((uint8_t*)&incoming_tempo)[3] = SPDR;
+			set_tempo = true;
 			break;
 		case config_btn_id:
 			config_id = SPDR;
@@ -685,9 +830,24 @@ ISR (SPI_STC_vect)
 	switch (spi_out_state) {
 		case command_byte: {
 			n_midi_cmd_outgoing = spiMidiOut.itemsAvail();
+#ifdef DIAG_MESSAGE
+			if (hasDiagMessage) {
+				hasDiagMessage = false;
+				SPDR = xyspi::diag_message;
+				spi_out_state = diag_message_length;
+			} else 
+#endif
 			if (n_midi_cmd_outgoing > 0) {
 				SPDR = (xyspi::midi | n_midi_cmd_outgoing);
 				spi_out_state = midi_data;
+			} else if (cancelMidiMasterClock) {
+				SPDR = xyspi::set_masterclk_off;
+				cancelMidiMasterClock = false;
+			} else if (tempo_requested) {
+				SPDR = xyspi::tempo;
+				tempo_requested = false;
+				outgoing_tempo = globalTempo;
+				spi_out_state = tempo_data;
 			} else {
 				SPDR = xyspi::pong;
 				spi_out_state = filler;
@@ -711,6 +871,36 @@ ISR (SPI_STC_vect)
 				spi_out_state = midi_data;
 			}
 			break;
+		case tempo_data:
+			spi_out_state = tempo_data_1;
+			SPDR = ((uint8_t*)&outgoing_tempo)[0];
+			break;
+		case tempo_data_1:
+			spi_out_state = tempo_data_2;
+			SPDR = ((uint8_t*)&outgoing_tempo)[1];
+			break;
+		case tempo_data_2:
+			spi_out_state = tempo_data_3;
+			SPDR = ((uint8_t*)&outgoing_tempo)[2];
+			break;
+		case tempo_data_3:
+			spi_out_state = command_byte;
+			SPDR = ((uint8_t*)&outgoing_tempo)[3];
+			break;
+#ifdef DIAG_MESSAGEs
+		case diag_message_length:
+			spi_out_state = diagMessageLength > 0? diag_message_data : command_byte;
+			diagMessageIdx = 0;
+			SPDR = diagMessageLength;
+			break;
+		case diag_message_data:
+			SPDR = diagMessage[diagMessageIdx];
+			if (++diagMessageIdx >= diagMessageLength) {
+				spi_out_state = command_byte;
+				hasDiagMessage = false;
+			}
+			break;
+#endif
 		case filler:
 			if (spiMidiOut.hasAvail() > 0) {
 				spi_out_state = command_byte;
@@ -820,6 +1010,14 @@ void loop() {
 		do_close = false;
 	}
 
+	if (set_tempo) {
+		globalTempo = incoming_tempo;
+		beatLength_s = 60 / globalTempo;
+		set_tempo = false;
+	}
+
+	auto theTime = millis();
+
 	// process incoming midi data, sending anything useful down the spi bus to the pi
 	if (midiA.read()) {
 #ifdef SERIAL_DEBUG
@@ -843,6 +1041,37 @@ void loop() {
 				break;
 
 			case midi::Clock:
+				if (isMidiMasterClock) {
+					isMidiMasterClock = false;
+					cancelMidiMasterClock = true;
+				}
+				if (lastTickMillis == 0) {
+					lastTickMillis = theTime;
+				} else {
+					auto tickDur = theTime - lastTickMillis;
+					uint8_t nCached;
+					if (clockCacheHead < 0) {
+						clockCacheTail = clockCacheHead = 0;
+						clockDurCache[0] = runningDurTotal = tickDur;
+						nCached = 1;
+					} else {
+						auto f = clockCacheTail - clockCacheHead - 1;
+						if (f == 0 || f == -nCachedClockTicks) /* full */{
+							runningDurTotal -= clockDurCache[clockCacheTail];
+							if (++clockCacheTail >= nCachedClockTicks) clockCacheTail = 0;
+							nCached = nCachedClockTicks;
+						} else {
+							if (f < 0) f += nCachedClockTicks; 
+							nCached = nCachedClockTicks - f;
+						}
+						if (++clockCacheHead >= nCachedClockTicks) clockCacheHead = 0;
+						clockDurCache[clockCacheHead] = tickDur;
+						runningDurTotal += tickDur;
+					}
+					auto aveBeatLen_ms = runningDurTotal;
+					if (nCached != 24) aveBeatLen_ms *= 24.0 / nCached;
+					globalTempo = 60000.0 / aveBeatLen_ms; 
+				}
 				break;
 
 			case midi::Start:
@@ -855,6 +1084,18 @@ void loop() {
 #endif
 	} else {
 //		Serial.println("nope");
+	}
+
+	if (startMidiMasterClock) {
+		isMidiMasterClock = true;
+		nextTickMillis = theTime;
+	}
+
+	if (isMidiMasterClock) {
+		if (theTime >= nextTickMillis) {
+			midiA.sendRealTime(midi::Clock);
+			nextTickMillis = nextTickMillis + (beatLength_s * 1000 / 24.0);
+		}	
 	}
 
 	const uint8_t currentButtons = buttonStates.getInputs();
@@ -908,5 +1149,13 @@ void loop() {
 				statusLamp.setColor(Lamp8574::red, 50);
 				break;
 		}
+	}
+
+	if (rescan_requested) { // look around for a new i2c device
+		rescan_requested = false;
+		if (accelerometer.begin()) {
+			accelerometer.setRange(adxl345::kRange16G);
+		}
+			
 	}
 }
