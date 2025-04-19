@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-namespace xy_mdi {
+namespace xymidi {
 	enum class bus_cmd: uint8_t {
 		greets = 'h',
 		sendMidiAny = '0', // or every
@@ -105,8 +105,8 @@ namespace xy_mdi {
 
 #pragma pack(push, 1)
 
-	struct midi_t {
-		midi_t() : cmd(0), val({0}) { }
+	struct msg {
+		msg() : cmd(0), val({0}) { }
 
 		void noteon(uint8_t chan, uint8_t note, uint8_t vel) { cmd = cmd::noteOn | (chan & 0xf); val.note.pitch = note; val.note.vel = vel; }
 		void noteon(uint8_t args[3]) { cmd = cmd::noteOn | (args[0] & 0xf); val.note.pitch = args[1]; val.note.vel = args[2]; }
