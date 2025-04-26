@@ -10,6 +10,7 @@
 
 #include "rgb_lempos.h"
 #include "xyspi.h"
+#include "xycfg.h"
 #include "midi_ring_buffer.h"
 
 #define SERIAL_DEBUG
