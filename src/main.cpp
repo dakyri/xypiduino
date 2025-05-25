@@ -888,7 +888,7 @@ ISR (SPI_STC_vect)
 			spi_out_state = command_byte;
 			SPDR = ((uint8_t*)&outgoing_tempo)[3];
 			break;
-#ifdef DIAG_MESSAGEs
+#ifdef DIAG_MESSAGE
 		case diag_message_length:
 			spi_out_state = diagMessageLength > 0? diag_message_data : command_byte;
 			diagMessageIdx = 0;
@@ -907,9 +907,11 @@ ISR (SPI_STC_vect)
 				spi_out_state = command_byte;
 				SPDR = xyspi::null; // keep talking!
 			} else {
-				SPDR = xyspi::pong;
 				if (was_pinged) {
 					spi_out_state = command_byte;
+					SPDR = xyspi::pong;
+				} else {
+					SPDR = xyspi::null;
 				}
 			}
 			break;

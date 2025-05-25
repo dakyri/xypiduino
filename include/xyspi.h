@@ -30,4 +30,6 @@ namespace xyspi {
 		diag_message = 13,	//!< diagnostic message (duino -> pi). 1 byte length in bytes, followed by multiple bytes
 	};
 
+	constexpr uint8_t maxCmdLen = 256;
+
 };
