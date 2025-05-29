@@ -903,7 +903,7 @@ ISR (SPI_STC_vect)
 			break;
 #endif
 		case filler:
-			if (spiMidiOut.hasAvail() > 0) {
+			if (spiMidiOut.hasAvail() > 0) { // FIXME: or some other request came in
 				spi_out_state = command_byte;
 				SPDR = xyspi::null; // keep talking!
 			} else {
